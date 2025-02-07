@@ -119,7 +119,7 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, PathGener
             SwapHop memory swap = SwapHop({pool: pool, amountSpecified: params.amountSpecified});
             uint256 amountIn = pool.version ? v3QuoteExactOut(swap) : v2QuoteExactOut(swap);
 
-            if (amountIn < bestQuote.amountIn) {
+            if (bestQuote.amountIn == 0 || amountIn < bestQuote.amountIn) {
                 bestQuote = pool.createQuoteSingle(amountIn, params.amountSpecified);
             }
         }

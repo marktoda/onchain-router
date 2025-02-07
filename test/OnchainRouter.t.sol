@@ -17,14 +17,15 @@ contract RouterForkTest is Test {
     IUniswapV3Factory v3Factory;
     IUniswapV2Factory v2Factory;
     address constant WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
-    address constant DAI = 0x6B175474E89094C44Da98b954EedeAC495271d0F;
-    address constant WBTC = 0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599;
     address constant USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
+    address constant WBTC = 0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599;
+    address constant DAI = 0x6B175474E89094C44Da98b954EedeAC495271d0F;
 
     uint24[4] currentV3FeeTiers = [uint24(100), uint24(500), uint24(3000), uint24(10000)];
 
     function setUp() public {
-        vm.createSelectFork(vm.envString("MAINNET_RPC_URL"), 19685800);
+        string memory rpc = vm.envString("MAINNET_RPC_URL");
+        vm.createSelectFork(rpc, 19685800);
 
         v3Factory = IUniswapV3Factory(0x1F98431c8aD98523631AE4a59f267346ea31F984);
         v2Factory = IUniswapV2Factory(0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f);
@@ -33,45 +34,68 @@ contract RouterForkTest is Test {
     }
 
     function test_getsFeeTiers() public {
-        assertTrue(onchainRouter.feeTiers(0) == 100);
-        assertTrue(onchainRouter.feeTiers(1) == 500);
-        assertTrue(onchainRouter.feeTiers(2) == 3000);
-        assertTrue(onchainRouter.feeTiers(3) == 10000);
+        assertEq(uint256(onchainRouter.feeTiers(0)), 100);
+        assertEq(uint256(onchainRouter.feeTiers(1)), 500);
+        assertEq(uint256(onchainRouter.feeTiers(2)), 3000);
+        assertEq(uint256(onchainRouter.feeTiers(3)), 10000);
         vm.expectRevert();
         onchainRouter.feeTiers(4);
     }
 
     function test_routeUsdcWethExactInput() public {
-        SwapParams memory request = SwapParams({amountSpecified: 1000 * 1e6, tokenIn: USDC, tokenOut: WETH});
+        SwapParams memory params = SwapParams({amountSpecified: 1000 * 1e6, tokenIn: USDC, tokenOut: WETH});
 
-        Quote memory quote = onchainRouter.routeExactInput(request);
-        assertEq(quote.amountOut, 326411625325180335);
+        Quote memory quote = onchainRouter.routeExactInput(params);
+
+        // Should use V3 pool with 0.05% fee
         assertEq(quote.path.length, 1);
         assertEq(quote.path[0].pool, 0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640);
+        assertEq(quote.amountOut, 326411625325180335);
 
-        // single option wins because it's weth
-        Quote memory single = onchainRouter.externalRouteExactInputSingle(request);
+        // Single hop should match since it's WETH
+        Quote memory single = onchainRouter.externalRouteExactInputSingle(params);
         assertEq(single.amountOut, quote.amountOut);
-        assertEq(single.path.length, 1);
+        assertEq(single.path.length, quote.path.length);
+        assertEq(single.path[0].pool, quote.path[0].pool);
+    }
+
+    function test_routeUsdcWethExactOutput() public {
+        uint256 amountOut = 1 ether;
+        SwapParams memory params = SwapParams({amountSpecified: amountOut, tokenIn: USDC, tokenOut: WETH});
+
+        Quote memory quote = onchainRouter.routeExactOutput(params);
+
+        // Should use V3 pool with 0.05% fee
+        assertEq(quote.path.length, 1);
+        assertEq(quote.path[0].pool, 0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640);
+        assertTrue(quote.amountIn > 0);
+
+        // Single hop should match since it's WETH
+        Quote memory single = onchainRouter.externalRouteExactOutputSingle(params);
+        assertEq(single.amountIn, quote.amountIn);
+        assertEq(single.path.length, quote.path.length);
         assertEq(single.path[0].pool, quote.path[0].pool);
     }
 
     function test_routeUsdcWbtcExactInput() public {
-        SwapParams memory request = SwapParams({amountSpecified: 1000 * 1e6, tokenIn: USDC, tokenOut: WBTC});
+        SwapParams memory params = SwapParams({amountSpecified: 1000 * 1e6, tokenIn: USDC, tokenOut: WBTC});
 
-        Quote memory quote = onchainRouter.routeExactInput(request);
-        console2.log(quote.amountOut);
-        console2.log(quote.path.length);
-        console2.log(quote.path[0].pool);
-        // assertEq(quote.amountOut, 326411625325180335);
-        // assertEq(quote.path.length, 1);
-        // assertEq(quote.path[0].pool, 0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640);
-        //
-        // // single option wins because it's weth
-        // Quote memory single = onchainRouter.externalRouteExactInputSingle(request);
-        // assertEq(single.amountOut, quote.amountOut);
-        // assertEq(single.path.length, 1);
-        // assertEq(single.path[0].pool, quote.path[0].pool);
+        Quote memory quote = onchainRouter.routeExactInput(params);
+
+        // Should find best path through WETH
+        assertEq(quote.path.length, 2);
+        assertTrue(quote.amountOut > 0);
+    }
+
+    function test_routeUsdcWbtcExactOutput() public {
+        uint256 amountOut = 1e8; // 1 WBTC
+        SwapParams memory params = SwapParams({amountSpecified: amountOut, tokenIn: USDC, tokenOut: WBTC});
+
+        Quote memory quote = onchainRouter.routeExactOutput(params);
+
+        // Should find best path through WETH
+        assertEq(quote.path.length, 2);
+        assertTrue(quote.amountIn > 0);
     }
 
     function test_routeHarryPotter() public {
@@ -127,6 +151,6 @@ contract RouterForkTest is Test {
         v3Factory.enableFeeAmount(feeTier, 60);
 
         onchainRouter.addNewFeeTier(feeTier);
-        assertTrue(onchainRouter.feeTiers(4) == feeTier);
+        assertEq(uint256(onchainRouter.feeTiers(4)), feeTier);
     }
 }

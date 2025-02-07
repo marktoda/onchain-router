@@ -41,7 +41,13 @@ abstract contract V3Quoter is OnchainRouterImmutables {
             sqrtPriceLimitX96: 0
         });
 
-        (amountOut,,) = v3QuoteExactInputSingleWithPool(params);
+        // Limit gas to 500,000 to prevent excessive computation
+        try this.v3QuoteExactInputSingleWithPool{gas: 500_000}(params) returns (uint256 _amountOut, uint160, uint32) {
+            amountOut = _amountOut;
+        } catch {
+            // Return 0 if quote fails due to gas limit
+            amountOut = 0;
+        }
     }
 
     function v3QuoteExactOut(SwapHop memory swap) internal view returns (uint256 amountIn) {
@@ -54,13 +60,19 @@ abstract contract V3Quoter is OnchainRouterImmutables {
             sqrtPriceLimitX96: 0
         });
 
-        (amountIn,,) = v3QuoteExactOutputSingleWithPool(params);
+        // Limit gas to 500,000 to prevent excessive computation
+        try this.v3QuoteExactOutputSingleWithPool{gas: 500_000}(params) returns (uint256 _amountIn, uint160, uint32) {
+            amountIn = _amountIn;
+        } catch {
+            // Return max if quote fails due to gas limit
+            amountIn = type(uint256).max;
+        }
     }
 
     // ---------------- PRIVATE HELPERS ----------------
 
     function v3QuoteExactInputSingleWithPool(IV3Quoter.QuoteExactInputSingleWithPoolParams memory params)
-        private
+        public
         view
         returns (uint256 amountReceived, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed)
     {
@@ -143,7 +155,7 @@ abstract contract V3Quoter is OnchainRouterImmutables {
     }
 
     function v3QuoteExactOutputSingleWithPool(IV3Quoter.QuoteExactOutputSingleWithPoolParams memory params)
-        private
+        public
         view
         returns (uint256 amountIn, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed)
     {
