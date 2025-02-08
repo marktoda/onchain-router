@@ -19,6 +19,9 @@ import {IV3Quoter} from "./interfaces/IV3Quoter.sol";
 import {OnchainRouterImmutables} from "./base/OnchainRouterImmutables.sol";
 import {SwapHop} from "./base/OnchainRouterStructs.sol";
 
+/// @title Uniswap V3 Pool Quoter
+/// @notice Provides functions for quoting V3 pool swaps without execution
+/// @dev Uses QuoterMath for core calculations and tick traversal
 abstract contract V3Quoter is OnchainRouterImmutables {
     using QuoterMath for *;
     using LowGasSafeMath for uint256;
@@ -31,6 +34,10 @@ abstract contract V3Quoter is OnchainRouterImmutables {
         pool = PoolAddress.computeAddress(address(v3Factory), PoolAddress.getPoolKey(tokenA, tokenB, fee));
     }
 
+    /// @notice Quotes an exact input swap on a V3 pool
+    /// @param swap The swap parameters including pool and amount
+    /// @return amountOut The expected output amount
+    /// @dev Returns 0 if quote fails due to gas limit
     function v3QuoteExactIn(SwapHop memory swap) internal view returns (uint256 amountOut) {
         IV3Quoter.QuoteExactInputSingleWithPoolParams memory params = IV3Quoter.QuoteExactInputSingleWithPoolParams({
             tokenIn: swap.pool.tokenIn,
@@ -50,6 +57,10 @@ abstract contract V3Quoter is OnchainRouterImmutables {
         }
     }
 
+    /// @notice Quotes an exact output swap on a V3 pool
+    /// @param swap The swap parameters including pool and desired output amount
+    /// @return amountIn The required input amount
+    /// @dev Returns type(uint256).max if quote fails due to gas limit
     function v3QuoteExactOut(SwapHop memory swap) internal view returns (uint256 amountIn) {
         IV3Quoter.QuoteExactOutputSingleWithPoolParams memory params = IV3Quoter.QuoteExactOutputSingleWithPoolParams({
             tokenIn: swap.pool.tokenIn,
@@ -71,6 +82,12 @@ abstract contract V3Quoter is OnchainRouterImmutables {
 
     // ---------------- PRIVATE HELPERS ----------------
 
+    /// @notice Performs detailed quote calculation for exact input swaps
+    /// @param params The quote parameters including pool address
+    /// @return amountReceived The expected output amount
+    /// @return sqrtPriceX96After The expected price after swap
+    /// @return initializedTicksCrossed Number of initialized ticks crossed
+    /// @dev Uses QuoterMath for precise calculations
     function v3QuoteExactInputSingleWithPool(IV3Quoter.QuoteExactInputSingleWithPoolParams memory params)
         public
         view
@@ -154,6 +171,12 @@ abstract contract V3Quoter is OnchainRouterImmutables {
         }
     }
 
+    /// @notice Performs detailed quote calculation for exact output swaps
+    /// @param params The quote parameters including pool address
+    /// @return amountIn The required input amount
+    /// @return sqrtPriceX96After The expected price after swap
+    /// @return initializedTicksCrossed Number of initialized ticks crossed
+    /// @dev Uses QuoterMath for precise calculations
     function v3QuoteExactOutputSingleWithPool(IV3Quoter.QuoteExactOutputSingleWithPoolParams memory params)
         public
         view

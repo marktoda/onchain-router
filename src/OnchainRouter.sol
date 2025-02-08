@@ -15,10 +15,15 @@ import {IV3Quoter} from "./interfaces/IV3Quoter.sol";
 import {V3Quoter} from "./V3Quoter.sol";
 import {V2Quoter} from "./V2Quoter.sol";
 
+/// @title Onchain Router for Uniswap V2 and V3
+/// @notice Finds and executes optimal swap paths across Uniswap V2 and V3 pools
+/// @dev Combines V2Quoter, V3Quoter, and PathGenerator functionality for best pricing
 contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, PathGenerator {
     using QuoteLibrary for Quote;
     using QuoteLibrary for Pool;
 
+    /// @notice The WETH token address used for intermediary swaps
+    /// @dev Used when direct pools don't exist between tokens
     address public immutable WETH;
 
     constructor(address _v2Factory, address _v3Factory, address _weth)
@@ -28,9 +33,10 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, PathGener
         WETH = _weth;
     }
 
-    /// @notice finds the best route for a given exact input swap
-    /// @param params struct containing tokenIn, tokenOut, and amountSpecified
-    /// @dev returns the best quote
+    /// @notice Finds the optimal route for an exact input swap
+    /// @param params The swap parameters including input token, output token, and input amount
+    /// @return bestQuote The optimal quote containing path and output amount
+    /// @dev Tries both direct routes and routes through WETH
     function routeExactInput(SwapParams memory params) public view returns (Quote memory bestQuote) {
         if (params.tokenIn == WETH || params.tokenOut == WETH) {
             return routeExactInputSingle(params);
@@ -41,9 +47,10 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, PathGener
         return multi.better(single);
     }
 
-    /// @notice finds the best route for a given exact output swap
-    /// @param params struct containing tokenIn, tokenOut, and amountSpecified
-    /// @dev returns the best quote
+    /// @notice Finds the optimal route for an exact output swap
+    /// @param params The swap parameters including input token, output token, and desired output amount
+    /// @return bestQuote The optimal quote containing path and required input amount
+    /// @dev Tries both direct routes and routes through WETH
     function routeExactOutput(SwapParams memory params) public view returns (Quote memory bestQuote) {
         if (params.tokenIn == WETH || params.tokenOut == WETH) {
             return routeExactOutputSingle(params);
@@ -54,10 +61,11 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, PathGener
         return multi.better(single);
     }
 
-    // ----- INTERNAL HELPERS -----
-
-    /// @notice finds all routes from input to intermediate and from intermediate to output
-    /// @dev returns the best route
+    /// @notice Finds the best route through an intermediate token for exact input swaps
+    /// @param params The swap parameters
+    /// @param intermediate The intermediate token address (usually WETH)
+    /// @return bestQuote The optimal multi-hop quote
+    /// @dev Combines two single-hop swaps through the intermediate token
     function routeExactInputMulti(SwapParams memory params, address intermediate)
         internal
         view
@@ -76,8 +84,11 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, PathGener
         bestQuote = inputToIntermediate.combine(intermediateToOutput);
     }
 
-    /// @notice finds all routes from output to intermediate and from intermediate to input
-    /// @dev returns the best route
+    /// @notice Finds the best route through an intermediate token for exact output swaps
+    /// @param params The swap parameters
+    /// @param intermediate The intermediate token address (usually WETH)
+    /// @return bestQuote The optimal multi-hop quote
+    /// @dev Works backwards from desired output amount
     function routeExactOutputMulti(SwapParams memory params, address intermediate)
         internal
         view
@@ -93,8 +104,10 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, PathGener
         bestQuote = intermediateToInput.combine(outputToIntermediate);
     }
 
-    /// @dev finds and quotes all single pools for a given single hop
-    /// @dev and returns the pool with the best quote
+    /// @notice Finds the best single pool for an exact input swap
+    /// @param params The swap parameters
+    /// @return bestQuote The optimal single-hop quote
+    /// @dev Tries all available pools (V2 and V3) for the token pair
     function routeExactInputSingle(SwapParams memory params) internal view returns (Quote memory bestQuote) {
         Pool[] memory pools = generatePaths(params.tokenIn, params.tokenOut);
 
@@ -109,8 +122,10 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, PathGener
         }
     }
 
-    /// @dev finds and quotes all single pools for a given single hop
-    /// @dev and returns the pool with the best quote
+    /// @notice Finds the best single pool for an exact output swap
+    /// @param params The swap parameters
+    /// @return bestQuote The optimal single-hop quote
+    /// @dev Tries all available pools (V2 and V3) for the token pair
     function routeExactOutputSingle(SwapParams memory params) internal view returns (Quote memory bestQuote) {
         Pool[] memory pools = generatePaths(params.tokenIn, params.tokenOut);
 
