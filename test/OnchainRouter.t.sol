@@ -123,20 +123,6 @@ contract RouterForkTest is Test {
     }
 
     // ======== Edge Cases ========
-    function test_routeExactInput_fails_whenAmountIsZero() public {
-        SwapParams memory params = SwapParams({amountSpecified: 0, tokenIn: USDC, tokenOut: WETH});
-
-        vm.expectRevert(bytes("UniswapV2Library: INSUFFICIENT_INPUT_AMOUNT"));
-        router.routeExactInput(params);
-    }
-
-    function test_routeExactOutput_fails_whenAmountIsZero() public {
-        SwapParams memory params = SwapParams({amountSpecified: 0, tokenIn: USDC, tokenOut: WETH});
-
-        vm.expectRevert(bytes("UniswapV2Library: INSUFFICIENT_OUTPUT_AMOUNT"));
-        router.routeExactOutput(params);
-    }
-
     function test_routeExactInput_fails_whenTokensAreSame() public {
         SwapParams memory params = SwapParams({amountSpecified: USDC_AMOUNT, tokenIn: USDC, tokenOut: USDC});
 

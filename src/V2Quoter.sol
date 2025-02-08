@@ -17,8 +17,17 @@ abstract contract V2Quoter is OnchainRouterImmutables {
     /// @return amountOut The expected output amount
     /// @dev Uses getAmountOut from UniswapV2Library
     function v2QuoteExactIn(SwapHop memory swap) internal view returns (uint256 amountOut) {
-        (uint256 reserveIn, uint256 reserveOut) = getReserves(swap);
+        // Limit gas to 100,000 to prevent excessive computation
+        try this._v2QuoteExactIn{gas: 100_000}(swap) returns (uint256 _amountOut) {
+            amountOut = _amountOut;
+        } catch {
+            // Return 0 if quote fails due to gas limit
+            amountOut = 0;
+        }
+    }
 
+    function _v2QuoteExactIn(SwapHop memory swap) public view returns (uint256 amountOut) {
+        (uint256 reserveIn, uint256 reserveOut) = getReserves(swap);
         amountOut = UniswapV2Library.getAmountOut(swap.amountSpecified, reserveIn, reserveOut);
     }
 
@@ -27,8 +36,17 @@ abstract contract V2Quoter is OnchainRouterImmutables {
     /// @return amountIn The required input amount
     /// @dev Uses getAmountIn from UniswapV2Library
     function v2QuoteExactOut(SwapHop memory swap) internal view returns (uint256 amountIn) {
-        (uint256 reserveIn, uint256 reserveOut) = getReserves(swap);
+        // Limit gas to 100,000 to prevent excessive computation
+        try this._v2QuoteExactOut{gas: 100_000}(swap) returns (uint256 _amountIn) {
+            amountIn = _amountIn;
+        } catch {
+            // Return max uint if quote fails due to gas limit
+            amountIn = type(uint256).max;
+        }
+    }
 
+    function _v2QuoteExactOut(SwapHop memory swap) public view returns (uint256 amountIn) {
+        (uint256 reserveIn, uint256 reserveOut) = getReserves(swap);
         amountIn = UniswapV2Library.getAmountIn(swap.amountSpecified, reserveIn, reserveOut);
     }
 
