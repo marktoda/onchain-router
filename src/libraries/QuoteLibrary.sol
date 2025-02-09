@@ -29,10 +29,22 @@ library QuoteLibrary {
     function better(Quote memory first, Quote memory second) internal pure returns (Quote memory) {
         if (first.amountIn == second.amountIn) {
             // exact input
-            return first.amountOut > second.amountOut ? first : second;
+            if (first.amountOut == 0) {
+                return second;
+            } else if (second.amountOut == 0) {
+                return first;
+            } else {
+                return first.amountOut > second.amountOut ? first : second;
+            }
         } else {
             // exact output
-            return first.amountIn < second.amountIn ? first : second;
+            if (first.amountIn == 0) {
+                return second;
+            } else if (second.amountIn == 0) {
+                return first;
+            } else {
+                return first.amountIn < second.amountIn ? first : second;
+            }
         }
     }
 }
