@@ -1,0 +1,26 @@
+{
+  "lib/forge-gas-snapshot": {
+    "rev": "1a5804e001531d580813d94e1a0f2853467202e6"
+  },
+  "lib/forge-std": {
+    "rev": "f73c73d2018eb6a111f35e4dae7b4f27401e9421"
+  },
+  "lib/openzeppelin-contracts": {
+    "rev": "04695aecbd4d17dddfd55de766d10e3805d6f42f"
+  },
+  "lib/v2-core": {
+    "rev": "4dd59067c76dea4a0e8e4bfdda41877a6b16dedc"
+  },
+  "lib/v2-periphery": {
+    "rev": "0335e8f7e1bd1e8d8329fd300aea2ef2f36dd19f"
+  },
+  "lib/v3-core": {
+    "rev": "e3589b192d0be27e100cd0daaf6c97204fdb1899"
+  },
+  "lib/v3-periphery": {
+    "rev": "80f26c86c57b8a5e4b913f42844d4c8bd274d058"
+  },
+  "lib/view-quoter-v3": {
+    "rev": "889c7381f5019baa835e89169125d8a369a61f95"
+  }
+}
