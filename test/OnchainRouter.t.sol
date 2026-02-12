@@ -7,6 +7,7 @@ import {IUniswapV2Factory} from "v2-core/contracts/interfaces/IUniswapV2Factory.
 import {OnchainRouter} from "../src/OnchainRouter.sol";
 import {SwapParams, Quote} from "../src/base/OnchainRouterStructs.sol";
 import {OnchainRouterExposed} from "./utils/OnchainRouterExposed.sol";
+import {ERC20} from "solmate/src/tokens/ERC20.sol";
 
 contract RouterForkTest is Test {
     // ======== Storage ========
@@ -181,4 +182,152 @@ contract RouterForkTest is Test {
         Quote memory quote = router.routeExactOutput(params);
         assertEq(quote.path.length, 1, "Should prefer single-hop route");
     }
+}
+
+contract SwapExecutionForkTest is Test {
+    OnchainRouter router;
+    IUniswapV3Factory v3Factory;
+    IUniswapV2Factory v2Factory;
+
+    address constant WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
+    address constant USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
+    address constant WBTC = 0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599;
+
+    // USDC uses FiatTokenProxy; `balances` mapping is at storage slot 9
+    uint256 constant USDC_BALANCE_SLOT = 9;
+
+    uint256 constant USDC_AMOUNT = 1000 * 1e6;
+    uint256 constant ETH_AMOUNT = 1 ether;
+
+    address recipient;
+
+    function setUp() public {
+        string memory rpc = vm.envString("MAINNET_RPC_URL");
+        vm.createSelectFork(rpc, 19685800);
+
+        v3Factory = IUniswapV3Factory(0x1F98431c8aD98523631AE4a59f267346ea31F984);
+        v2Factory = IUniswapV2Factory(0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f);
+
+        router = new OnchainRouter(address(v2Factory), address(v3Factory), WETH);
+        recipient = makeAddr("recipient");
+    }
+
+    /// @dev Write directly to USDC's balance storage slot (proxy-safe)
+    function _dealUSDC(address to, uint256 amount) internal {
+        vm.store(USDC, keccak256(abi.encode(to, USDC_BALANCE_SLOT)), bytes32(amount));
+    }
+
+    // ======== ERC20 → ERC20 Exact Input ========
+    function test_swapExactInput_ERC20_to_ERC20() public {
+        // USDC → WETH
+        SwapParams memory params = SwapParams({amountSpecified: USDC_AMOUNT, tokenIn: USDC, tokenOut: WETH});
+        Quote memory quote = router.routeExactInput(params);
+
+        _dealUSDC(address(this), quote.amountIn);
+        ERC20(USDC).approve(address(router), quote.amountIn);
+
+        uint256 amountOut = router.swapExactInput(quote, recipient, block.timestamp, false);
+
+        assertGt(amountOut, 0, "Should receive output tokens");
+        assertEq(ERC20(WETH).balanceOf(recipient), amountOut, "Recipient should receive WETH");
+    }
+
+    // ======== ERC20 → ERC20 Exact Output ========
+    function test_swapExactOutput_ERC20_to_ERC20() public {
+        // USDC → WETH, want exactly 1 ETH worth of WETH
+        SwapParams memory params = SwapParams({amountSpecified: ETH_AMOUNT, tokenIn: USDC, tokenOut: WETH});
+        Quote memory quote = router.routeExactOutput(params);
+
+        _dealUSDC(address(this), quote.amountIn);
+        ERC20(USDC).approve(address(router), quote.amountIn);
+
+        uint256 balanceBefore = ERC20(USDC).balanceOf(address(this));
+        uint256 amountIn = router.swapExactOutput(quote, recipient, block.timestamp, false);
+
+        uint256 balanceAfter = ERC20(USDC).balanceOf(address(this));
+        assertEq(ERC20(WETH).balanceOf(recipient), ETH_AMOUNT, "Recipient should receive exact WETH");
+        assertLe(amountIn, quote.amountIn, "Actual input should not exceed quoted max");
+        assertEq(balanceAfter, balanceBefore - amountIn, "Excess should be refunded");
+    }
+
+    // ======== ETH → ERC20 Exact Input ========
+    function test_swapExactInput_ETH_to_ERC20() public {
+        // ETH → USDC
+        SwapParams memory params = SwapParams({amountSpecified: ETH_AMOUNT, tokenIn: WETH, tokenOut: USDC});
+        Quote memory quote = router.routeExactInput(params);
+
+        uint256 amountOut = router.swapExactInput{value: ETH_AMOUNT}(quote, recipient, block.timestamp, false);
+
+        assertGt(amountOut, 0, "Should receive USDC");
+        assertEq(ERC20(USDC).balanceOf(recipient), amountOut, "Recipient should receive USDC");
+    }
+
+    // ======== ETH → ERC20 Exact Output with Refund ========
+    function test_swapExactOutput_ETH_to_ERC20_refund() public {
+        // ETH → USDC, want exactly 1000 USDC
+        SwapParams memory params = SwapParams({amountSpecified: USDC_AMOUNT, tokenIn: WETH, tokenOut: USDC});
+        Quote memory quote = router.routeExactOutput(params);
+
+        uint256 ethBefore = address(this).balance;
+        uint256 amountIn = router.swapExactOutput{value: quote.amountIn}(quote, recipient, block.timestamp, false);
+
+        assertEq(ERC20(USDC).balanceOf(recipient), USDC_AMOUNT, "Recipient should receive exact USDC");
+        uint256 ethAfter = address(this).balance;
+        assertEq(ethAfter, ethBefore - amountIn, "Excess ETH should be refunded");
+    }
+
+    // ======== ERC20 → ETH Exact Input with Unwrap ========
+    function test_swapExactInput_ERC20_to_ETH_unwrap() public {
+        // USDC → WETH, unwrap to ETH
+        SwapParams memory params = SwapParams({amountSpecified: USDC_AMOUNT, tokenIn: USDC, tokenOut: WETH});
+        Quote memory quote = router.routeExactInput(params);
+
+        _dealUSDC(address(this), quote.amountIn);
+        ERC20(USDC).approve(address(router), quote.amountIn);
+
+        uint256 ethBefore = recipient.balance;
+        uint256 amountOut = router.swapExactInput(quote, recipient, block.timestamp, true);
+
+        assertGt(amountOut, 0, "Should receive output");
+        assertEq(recipient.balance - ethBefore, amountOut, "Recipient should receive ETH");
+        assertEq(ERC20(WETH).balanceOf(recipient), 0, "Recipient should not have WETH");
+    }
+
+    // ======== Deadline Revert ========
+    function test_swapExactInput_reverts_deadlineExpired() public {
+        // Use ETH input to avoid USDC deal issues in revert test
+        SwapParams memory params = SwapParams({amountSpecified: ETH_AMOUNT, tokenIn: WETH, tokenOut: USDC});
+        Quote memory quote = router.routeExactInput(params);
+
+        vm.expectRevert(OnchainRouter.DeadlineExpired.selector);
+        router.swapExactInput{value: ETH_AMOUNT}(quote, recipient, block.timestamp - 1, false);
+    }
+
+    function test_swapExactOutput_reverts_deadlineExpired() public {
+        // Use ETH input to avoid USDC deal issues in revert test
+        SwapParams memory params = SwapParams({amountSpecified: USDC_AMOUNT, tokenIn: WETH, tokenOut: USDC});
+        Quote memory quote = router.routeExactOutput(params);
+
+        vm.expectRevert(OnchainRouter.DeadlineExpired.selector);
+        router.swapExactOutput{value: quote.amountIn}(quote, recipient, block.timestamp - 1, false);
+    }
+
+    // ======== Multi-hop Swap Execution ========
+    function test_swapExactInput_multiHop_USDC_WBTC() public {
+        // USDC → WBTC via WETH (multi-hop)
+        SwapParams memory params = SwapParams({amountSpecified: USDC_AMOUNT, tokenIn: USDC, tokenOut: WBTC});
+        Quote memory quote = router.routeExactInput(params);
+
+        assertEq(quote.path.length, 2, "Should be multi-hop");
+
+        _dealUSDC(address(this), quote.amountIn);
+        ERC20(USDC).approve(address(router), quote.amountIn);
+
+        uint256 amountOut = router.swapExactInput(quote, recipient, block.timestamp, false);
+
+        assertGt(amountOut, 0, "Should receive WBTC");
+        assertEq(ERC20(WBTC).balanceOf(recipient), amountOut, "Recipient should receive WBTC");
+    }
+
+    receive() external payable {}
 }

@@ -13,11 +13,15 @@ import {OnchainRouterImmutables} from "./base/OnchainRouterImmutables.sol";
 import {IV3Quoter} from "./interfaces/IV3Quoter.sol";
 import {V3Quoter} from "./V3Quoter.sol";
 import {V2Quoter} from "./V2Quoter.sol";
+import {IWETH9} from "./interfaces/IWETH9.sol";
+import {SafeTransferLib} from "solmate/src/utils/SafeTransferLib.sol";
+import {ERC20} from "solmate/src/tokens/ERC20.sol";
+import {SwapExecutor} from "./base/SwapExecutor.sol";
 
 /// @title Onchain Router for Uniswap V2 and V3
 /// @notice Finds and executes optimal swap paths across Uniswap V2 and V3 pools
 /// @dev Combines V2Quoter, V3Quoter, and PathGenerator functionality for best pricing
-contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, PathGenerator {
+contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, PathGenerator, SwapExecutor {
     using QuoteLibrary for Quote;
     using QuoteLibrary for Pool;
 
@@ -25,11 +29,88 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, PathGener
     /// @dev Used when direct pools don't exist between tokens
     address public immutable intermediateToken;
 
+    error DeadlineExpired();
+    error InsufficientETH();
+
     constructor(address _v2Factory, address _v3Factory, address _intermediateToken)
         OnchainRouterImmutables(_v2Factory, _v3Factory)
         PathGenerator(_v3Factory)
     {
         intermediateToken = _intermediateToken;
+    }
+
+    receive() external payable {}
+
+    /// @notice Executes an exact input swap using a previously quoted route
+    /// @param quote The quote obtained from routeExactInput
+    /// @param recipient The address that will receive the output tokens
+    /// @param deadline The unix timestamp after which the swap will revert
+    /// @param unwrapOutput If true, unwraps WETH output to ETH before sending to recipient
+    /// @return amountOut The amount of output tokens received
+    function swapExactInput(Quote memory quote, address recipient, uint256 deadline, bool unwrapOutput)
+        external
+        payable
+        returns (uint256 amountOut)
+    {
+        if (block.timestamp > deadline) revert DeadlineExpired();
+
+        if (msg.value > 0) {
+            IWETH9(intermediateToken).deposit{value: msg.value}();
+        } else {
+            SafeTransferLib.safeTransferFrom(
+                ERC20(quote.path[0].tokenIn), msg.sender, address(this), quote.amountIn
+            );
+        }
+
+        address swapRecipient = unwrapOutput ? address(this) : recipient;
+        amountOut = _swapExactInput(quote, swapRecipient);
+
+        if (unwrapOutput) {
+            IWETH9(intermediateToken).withdraw(amountOut);
+            SafeTransferLib.safeTransferETH(recipient, amountOut);
+        }
+    }
+
+    /// @notice Executes an exact output swap using a previously quoted route
+    /// @param quote The quote obtained from routeExactOutput
+    /// @param recipient The address that will receive the output tokens
+    /// @param deadline The unix timestamp after which the swap will revert
+    /// @param unwrapOutput If true, unwraps WETH output to ETH before sending to recipient
+    /// @return amountIn The actual amount of input tokens consumed
+    function swapExactOutput(Quote memory quote, address recipient, uint256 deadline, bool unwrapOutput)
+        external
+        payable
+        returns (uint256 amountIn)
+    {
+        if (block.timestamp > deadline) revert DeadlineExpired();
+
+        if (msg.value > 0) {
+            IWETH9(intermediateToken).deposit{value: msg.value}();
+        } else {
+            SafeTransferLib.safeTransferFrom(
+                ERC20(quote.path[0].tokenIn), msg.sender, address(this), quote.amountIn
+            );
+        }
+
+        address swapRecipient = unwrapOutput ? address(this) : recipient;
+        amountIn = _swapExactOutput(quote, swapRecipient);
+
+        if (unwrapOutput) {
+            uint256 outputAmount = quote.amountOut;
+            IWETH9(intermediateToken).withdraw(outputAmount);
+            SafeTransferLib.safeTransferETH(recipient, outputAmount);
+        }
+
+        // Refund excess input
+        uint256 excess = quote.amountIn - amountIn;
+        if (excess > 0) {
+            if (msg.value > 0) {
+                IWETH9(intermediateToken).withdraw(excess);
+                SafeTransferLib.safeTransferETH(msg.sender, excess);
+            } else {
+                SafeTransferLib.safeTransfer(ERC20(quote.path[0].tokenIn), msg.sender, excess);
+            }
+        }
     }
 
     /// @notice Finds the optimal route for an exact input swap
