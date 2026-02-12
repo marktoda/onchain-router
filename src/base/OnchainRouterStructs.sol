@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: UNLICENSED
-pragma solidity ^0.7.6;
-pragma abicoder v2;
+pragma solidity ^0.8.0;
 
 /// @title Core structs for Onchain Router
 /// @notice Defines the main data structures used throughout the router

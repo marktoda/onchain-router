@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-pragma solidity ^0.7.6;
-pragma abicoder v2;
+pragma solidity ^0.8.0;
 
 /// @notice Detects the buy and sell fee for a fee-on-transfer token
 interface IFeeOnTransferDetector {

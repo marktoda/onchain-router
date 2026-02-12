@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-pragma solidity ^0.8.26;
+pragma solidity ^0.8.0;
 
 import {IUniswapV2Pair} from "@uniswap/v2-core/contracts/interfaces/IUniswapV2Pair.sol";
 import {V3Path} from "@uniswap/universal-router/contracts/modules/uniswap/v3/V3Path.sol";
@@ -9,10 +9,10 @@ import {SafeCast} from "@uniswap/v3-core/contracts/libraries/SafeCast.sol";
 import {CalldataDecoder} from "@uniswap/v4-periphery/src/libraries/CalldataDecoder.sol";
 import {IUniswapV3Pool} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
 import {IUniswapV3SwapCallback} from "@uniswap/v3-core/contracts/interfaces/callback/IUniswapV3SwapCallback.sol";
-import {ERC20} from "solmate/tokens/ERC20.sol";
-import {SafeTransferLib} from "solmate/utils/SafeTransferLib.sol";
+import {ERC20} from "solmate/src/tokens/ERC20.sol";
+import {SafeTransferLib} from "solmate/src/utils/SafeTransferLib.sol";
 import {MaxInputAmount} from "briefcase/protocols/universal-router/libraries/MaxInputAmount.sol";
-import {Quote, Pool} from "../interfaces/IOnchainRouter.sol";
+import {Quote, Pool} from "../base/OnchainRouterStructs.sol";
 import {UniswapV2Library} from "../libraries/UniswapV2Library.sol";
 import "./OnchainRouterImmutables.sol";
 

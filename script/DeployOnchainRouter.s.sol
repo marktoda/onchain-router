@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: UNLICENSED
-pragma solidity ^0.7.6;
+pragma solidity ^0.8.0;
 
 import {Script, console2} from "forge-std/Script.sol";
 import {OnchainRouter} from "../src/OnchainRouter.sol";

@@ -1,4 +1,10 @@
 {
+  "lib/briefcase": {
+    "tag": {
+      "name": "v0.1.45",
+      "rev": "2180eaa10d26489f3d4702e3068dc04f02d3f938"
+    }
+  },
   "lib/forge-gas-snapshot": {
     "rev": "1a5804e001531d580813d94e1a0f2853467202e6"
   },
@@ -7,6 +13,9 @@
   },
   "lib/openzeppelin-contracts": {
     "rev": "04695aecbd4d17dddfd55de766d10e3805d6f42f"
+  },
+  "lib/solmate": {
+    "rev": "89365b880c4f3c786bdd453d4b8e8fe410344a69"
   },
   "lib/v2-core": {
     "rev": "4dd59067c76dea4a0e8e4bfdda41877a6b16dedc"
@@ -19,6 +28,15 @@
   },
   "lib/v3-periphery": {
     "rev": "80f26c86c57b8a5e4b913f42844d4c8bd274d058"
+  },
+  "lib/v4-core": {
+    "tag": {
+      "name": "v4.0.0",
+      "rev": "e50237c43811bd9b526eff40f26772152a42daba"
+    }
+  },
+  "lib/v4-periphery": {
+    "rev": "3779387e5d296f39df543d23524b050f89a62917"
   },
   "lib/view-quoter-v3": {
     "rev": "889c7381f5019baa835e89169125d8a369a61f95"

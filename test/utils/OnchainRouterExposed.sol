@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: UNLICENSED
-pragma solidity ^0.7.6;
-pragma abicoder v2;
+pragma solidity ^0.8.0;
 
 import {OnchainRouter} from "../../src/OnchainRouter.sol";
 import {SwapHop, SwapParams, Quote, Pool} from "../../src/base/OnchainRouterStructs.sol";

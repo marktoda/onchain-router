@@ -1,6 +1,8 @@
 ds-test/=lib/forge-std/lib/ds-test/src/
 forge-std/=lib/forge-std/src/
 solmate/=lib/solmate/
+v4-core/=lib/v4-core/
+v4-periphery/=lib/v4-periphery/
 v3-core/=lib/v3-core/
 v3-periphery/=lib/v3-periphery/
 v2-periphery/=lib/v2-periphery/
@@ -9,4 +11,6 @@ v3-view/=lib/view-quoter-v3/
 @openzeppelin/=lib/openzeppelin-contracts
 @uniswap/v3-core=lib/v3-core/
 @uniswap/v2-periphery=lib/v2-periphery/
+@uniswap/v4-periphery=lib/v4-periphery/
 @uniswap/v2-core=lib/v2-core/
+@uniswap/universal-router/contracts=lib/briefcase/src/protocols/universal-router/

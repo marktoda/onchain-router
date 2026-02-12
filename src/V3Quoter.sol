@@ -1,20 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-pragma solidity ^0.7.6;
-pragma abicoder v2;
+pragma solidity ^0.8.0;
 
 import {IUniswapV3Factory} from "v3-core/contracts/interfaces/IUniswapV3Factory.sol";
 import {IUniswapV3Pool} from "v3-core/contracts/interfaces/IUniswapV3Pool.sol";
-import {SwapMath} from "v3-core/contracts/libraries/SwapMath.sol";
-import {FullMath} from "v3-core/contracts/libraries/FullMath.sol";
 import {TickMath} from "v3-core/contracts/libraries/TickMath.sol";
-import "v3-core/contracts/libraries/LowGasSafeMath.sol";
-import "v3-core/contracts/libraries/SafeCast.sol";
-import "v3-periphery/contracts/libraries/Path.sol";
-import {SqrtPriceMath} from "v3-core/contracts/libraries/SqrtPriceMath.sol";
-import {LiquidityMath} from "v3-core/contracts/libraries/LiquidityMath.sol";
-import {PoolAddress} from "v3-view/contracts/libraries/PoolAddress.sol";
-import {QuoterMath} from "v3-view/contracts/libraries/QuoterMath.sol";
-import {PoolTickBitmap} from "v3-view/contracts/libraries/PoolTickBitmap.sol";
+import {SafeCast} from "v3-core/contracts/libraries/SafeCast.sol";
+import {Path} from "v3-periphery/contracts/libraries/Path.sol";
+import {PoolAddress} from "./libraries/PoolAddress.sol";
+import {QuoterMath} from "./libraries/QuoterMath.sol";
 import {IV3Quoter} from "./interfaces/IV3Quoter.sol";
 import {OnchainRouterImmutables} from "./base/OnchainRouterImmutables.sol";
 import {SwapHop} from "./base/OnchainRouterStructs.sol";
@@ -24,8 +17,6 @@ import {SwapHop} from "./base/OnchainRouterStructs.sol";
 /// @dev Uses QuoterMath for core calculations and tick traversal
 abstract contract V3Quoter is OnchainRouterImmutables {
     using QuoterMath for *;
-    using LowGasSafeMath for uint256;
-    using LowGasSafeMath for int256;
     using SafeCast for uint256;
     using SafeCast for int256;
     using Path for bytes;
