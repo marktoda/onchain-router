@@ -149,11 +149,7 @@ abstract contract V3Quoter is OnchainRouterImmutables {
             // the outputs of prior swaps become the inputs to subsequent ones
             (uint256 _amountOut, uint160 _sqrtPriceX96After, uint32 initializedTicksCrossed) = v3QuoteExactInputSingle(
                 IV3Quoter.QuoteExactInputSingleParams({
-                    tokenIn: tokenIn,
-                    tokenOut: tokenOut,
-                    fee: fee,
-                    amountIn: amountIn,
-                    sqrtPriceLimitX96: 0
+                    tokenIn: tokenIn, tokenOut: tokenOut, fee: fee, amountIn: amountIn, sqrtPriceLimitX96: 0
                 })
             );
 
@@ -219,8 +215,7 @@ abstract contract V3Quoter is OnchainRouterImmutables {
     {
         address pool = getPool(params.tokenIn, params.tokenOut, params.fee);
 
-        IV3Quoter.QuoteExactOutputSingleWithPoolParams memory poolParams = IV3Quoter
-            .QuoteExactOutputSingleWithPoolParams({
+        IV3Quoter.QuoteExactOutputSingleWithPoolParams memory poolParams = IV3Quoter.QuoteExactOutputSingleWithPoolParams({
             tokenIn: params.tokenIn,
             tokenOut: params.tokenOut,
             amount: params.amount,
@@ -247,11 +242,7 @@ abstract contract V3Quoter is OnchainRouterImmutables {
             // the inputs of prior swaps become the outputs of subsequent ones
             (uint256 _amountIn, uint160 _sqrtPriceX96After, uint32 _initializedTicksCrossed) = v3QuoteExactOutputSingle(
                 IV3Quoter.QuoteExactOutputSingleParams({
-                    tokenIn: tokenIn,
-                    tokenOut: tokenOut,
-                    amount: amountOut,
-                    fee: fee,
-                    sqrtPriceLimitX96: 0
+                    tokenIn: tokenIn, tokenOut: tokenOut, amount: amountOut, fee: fee, sqrtPriceLimitX96: 0
                 })
             );
 

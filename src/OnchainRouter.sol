@@ -76,9 +76,7 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, PathGener
         );
         Quote memory intermediateToOutput = routeExactInputSingle(
             SwapParams({
-                tokenIn: intermediate,
-                tokenOut: params.tokenOut,
-                amountSpecified: inputToIntermediate.amountOut
+                tokenIn: intermediate, tokenOut: params.tokenOut, amountSpecified: inputToIntermediate.amountOut
             })
         );
         bestQuote = inputToIntermediate.combine(intermediateToOutput);
@@ -98,7 +96,9 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, PathGener
             SwapParams({tokenIn: intermediate, tokenOut: params.tokenOut, amountSpecified: params.amountSpecified})
         );
         Quote memory intermediateToInput = routeExactOutputSingle(
-            SwapParams({tokenIn: params.tokenIn, tokenOut: intermediate, amountSpecified: outputToIntermediate.amountIn})
+            SwapParams({
+                tokenIn: params.tokenIn, tokenOut: intermediate, amountSpecified: outputToIntermediate.amountIn
+            })
         );
 
         bestQuote = intermediateToInput.combine(outputToIntermediate);
