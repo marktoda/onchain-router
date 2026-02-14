@@ -60,16 +60,19 @@ contract OnchainRouter is
     {
         if (block.timestamp > deadline) revert DeadlineExpired();
 
+        // When a V4 native ETH pool wins, path[0].tokenIn is address(0) but the
+        // user-facing token is intermediateToken (WETH). Resolve that here.
+        address userTokenIn = _resolveUserToken(quote.path[0].tokenIn);
+
         if (msg.value > 0) {
             IWETH9(intermediateToken).deposit{value: msg.value}();
         } else {
-            SafeTransferLib.safeTransferFrom(ERC20(quote.path[0].tokenIn), msg.sender, address(this), quote.amountIn);
+            SafeTransferLib.safeTransferFrom(ERC20(userTokenIn), msg.sender, address(this), quote.amountIn);
         }
 
         address swapRecipient = unwrapOutput ? address(this) : recipient;
         amountOut = _swapExactInput(quote, swapRecipient);
 
-        // Increment V4 leaderboard scores for winning V4 hops
         _updateV4Scores(quote);
 
         if (unwrapOutput) {
@@ -85,16 +88,17 @@ contract OnchainRouter is
     {
         if (block.timestamp > deadline) revert DeadlineExpired();
 
+        address userTokenIn = _resolveUserToken(quote.path[0].tokenIn);
+
         if (msg.value > 0) {
             IWETH9(intermediateToken).deposit{value: msg.value}();
         } else {
-            SafeTransferLib.safeTransferFrom(ERC20(quote.path[0].tokenIn), msg.sender, address(this), quote.amountIn);
+            SafeTransferLib.safeTransferFrom(ERC20(userTokenIn), msg.sender, address(this), quote.amountIn);
         }
 
         address swapRecipient = unwrapOutput ? address(this) : recipient;
         amountIn = _swapExactOutput(quote, swapRecipient);
 
-        // Increment V4 leaderboard scores for winning V4 hops
         _updateV4Scores(quote);
 
         if (unwrapOutput) {
@@ -109,9 +113,14 @@ contract OnchainRouter is
                 IWETH9(intermediateToken).withdraw(excess);
                 SafeTransferLib.safeTransferETH(msg.sender, excess);
             } else {
-                SafeTransferLib.safeTransfer(ERC20(quote.path[0].tokenIn), msg.sender, excess);
+                SafeTransferLib.safeTransfer(ERC20(userTokenIn), msg.sender, excess);
             }
         }
+    }
+
+    /// @notice V4 native ETH pools use address(0) as currency, but users hold WETH
+    function _resolveUserToken(address token) private view returns (address) {
+        return token == address(0) ? intermediateToken : token;
     }
 
     function _updateV4Scores(Quote memory quote) private {
