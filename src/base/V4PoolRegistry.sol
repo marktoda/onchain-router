@@ -91,6 +91,12 @@ abstract contract V4PoolRegistry is OnchainRouterImmutables {
         view
         returns (Pool[] memory pools)
     {
+        // Skip V4 discovery if poolManager is not set
+        if (address(poolManager) == address(0)) {
+            pools = new Pool[](0);
+            return pools;
+        }
+
         // Max possible: defaultConfigs * 2 (for native ETH dual-check) + MAX_V4_POOLS_PER_PAIR
         uint256 maxPools = defaultV4Configs.length * 2 + MAX_V4_POOLS_PER_PAIR;
         pools = new Pool[](maxPools);
