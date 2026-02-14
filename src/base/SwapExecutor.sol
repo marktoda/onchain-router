@@ -3,23 +3,15 @@
 pragma solidity ^0.8.0;
 
 import {IUniswapV2Pair} from "@uniswap/v2-core/contracts/interfaces/IUniswapV2Pair.sol";
-import {V3Path} from "@uniswap/universal-router/contracts/modules/uniswap/v3/V3Path.sol";
-import {BytesLib} from "@uniswap/universal-router/contracts/modules/uniswap/v3/BytesLib.sol";
-import {SafeCast} from "@uniswap/v3-core/contracts/libraries/SafeCast.sol";
-import {CalldataDecoder} from "@uniswap/v4-periphery/src/libraries/CalldataDecoder.sol";
 import {IUniswapV3Pool} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
-import {IUniswapV3SwapCallback} from "@uniswap/v3-core/contracts/interfaces/callback/IUniswapV3SwapCallback.sol";
 import {ERC20} from "solmate/src/tokens/ERC20.sol";
 import {SafeTransferLib} from "solmate/src/utils/SafeTransferLib.sol";
 import {MaxInputAmount} from "briefcase/protocols/universal-router/libraries/MaxInputAmount.sol";
 import {Quote, Pool, V2, V3, V4} from "../base/OnchainRouterStructs.sol";
 import {UniswapV2Library} from "../libraries/UniswapV2Library.sol";
-import "./OnchainRouterImmutables.sol";
-
-import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
+import {OnchainRouterImmutables} from "./OnchainRouterImmutables.sol";
 import {IUnlockCallback} from "v4-core/src/interfaces/callback/IUnlockCallback.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
-import {PoolId, PoolIdLibrary} from "v4-core/src/types/PoolId.sol";
 import {Currency} from "v4-core/src/types/Currency.sol";
 import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
 import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
@@ -30,23 +22,8 @@ import {IWETH9} from "../interfaces/IWETH9.sol";
 /// @title Swap Executor for Uniswap V2, V3, and V4 Trades
 /// @notice Handles the execution of swaps across Uniswap V2, V3, and V4 protocols
 abstract contract SwapExecutor is OnchainRouterImmutables, IUnlockCallback {
-    /// @dev Uniswap V3 pool initialization code hash used for pool address computation
-    bytes32 private constant UNISWAP_V3_POOL_INIT_CODE_HASH =
-        0xe34f199b19b2b4f47f68442619d555527d244f78a3297ea89325f843f87b8b54;
-    /// @dev Uniswap V2 pair initialization code hash used for pair address computation
-    bytes32 private constant UNISWAP_V2_PAIR_INIT_CODE_HASH =
-        0x96e8ac4277198ff8b6f785478aa9a39f403cb768dd02cbee326c3e7da348845f;
-
-    /// @dev The minimum value that can be returned from #getSqrtRatioAtTick. Equivalent to getSqrtRatioAtTick(MIN_TICK)
-    uint160 internal constant MIN_SQRT_RATIO = 4295128739;
-
-    /// @dev The maximum value that can be returned from #getSqrtRatioAtTick. Equivalent to getSqrtRatioAtTick(MAX_TICK)
-    uint160 internal constant MAX_SQRT_RATIO = 1461446703485210103287273052203988822378723970342;
-
-    using V3Path for bytes;
-    using BytesLib for bytes;
-    using CalldataDecoder for bytes;
-    using SafeCast for uint256;
+    uint160 private constant MIN_SQRT_RATIO = 4295128739;
+    uint160 private constant MAX_SQRT_RATIO = 1461446703485210103287273052203988822378723970342;
 
     error V3InvalidSwap();
     error V2TooMuchRequested();
@@ -280,7 +257,7 @@ abstract contract SwapExecutor is OnchainRouterImmutables, IUnlockCallback {
     }
 
     // ─────────────────────────────────────────────────────────────
-    //  V2 Swap Execution (unchanged)
+    //  V2 Swap Execution
     // ─────────────────────────────────────────────────────────────
 
     function _v2SwapExactInput(Pool memory pool, uint256 amountIn, address recipient)
@@ -300,7 +277,7 @@ abstract contract SwapExecutor is OnchainRouterImmutables, IUnlockCallback {
     }
 
     // ─────────────────────────────────────────────────────────────
-    //  V3 Swap Execution (unchanged)
+    //  V3 Swap Execution
     // ─────────────────────────────────────────────────────────────
 
     function _v3SwapExactInput(Quote memory quote, uint256 amountIn, address recipient, uint256 pathIndex)
@@ -367,7 +344,7 @@ abstract contract SwapExecutor is OnchainRouterImmutables, IUnlockCallback {
     }
 
     // ─────────────────────────────────────────────────────────────
-    //  V3 Callback (unchanged)
+    //  V3 Callback
     // ─────────────────────────────────────────────────────────────
 
     function uniswapV3SwapCallback(int256 amount0Delta, int256 amount1Delta, bytes calldata data) external {

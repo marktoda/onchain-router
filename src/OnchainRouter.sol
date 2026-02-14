@@ -1,16 +1,10 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.0;
 
-import {IUniswapV3Factory} from "v3-core/contracts/interfaces/IUniswapV3Factory.sol";
-import {IUniswapV2Pair} from "v2-core/contracts/interfaces/IUniswapV2Pair.sol";
-import {IUniswapV2Factory} from "v2-core/contracts/interfaces/IUniswapV2Factory.sol";
-import {IFeeOnTransferDetector} from "../src/interfaces/IFeeOnTransferDetector.sol";
-import {UniswapV2Library} from "./libraries/UniswapV2Library.sol";
 import {PathGenerator} from "./base/PathGenerator.sol";
 import {QuoteLibrary} from "./libraries/QuoteLibrary.sol";
 import {SwapParams, Pool, SwapHop, Quote, V2, V3, V4} from "./base/OnchainRouterStructs.sol";
 import {OnchainRouterImmutables} from "./base/OnchainRouterImmutables.sol";
-import {IV3Quoter} from "./interfaces/IV3Quoter.sol";
 import {V3Quoter} from "./V3Quoter.sol";
 import {V2Quoter} from "./V2Quoter.sol";
 import {V4Quoter} from "./V4Quoter.sol";
