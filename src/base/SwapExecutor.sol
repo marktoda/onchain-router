@@ -12,14 +12,24 @@ import {IUniswapV3SwapCallback} from "@uniswap/v3-core/contracts/interfaces/call
 import {ERC20} from "solmate/src/tokens/ERC20.sol";
 import {SafeTransferLib} from "solmate/src/utils/SafeTransferLib.sol";
 import {MaxInputAmount} from "briefcase/protocols/universal-router/libraries/MaxInputAmount.sol";
-import {Quote, Pool} from "../base/OnchainRouterStructs.sol";
+import {Quote, Pool, V2, V3, V4} from "../base/OnchainRouterStructs.sol";
 import {UniswapV2Library} from "../libraries/UniswapV2Library.sol";
 import "./OnchainRouterImmutables.sol";
 
-/// @title Swap Executor for Uniswap V2 and V3 Trades
-/// @notice Handles the execution of swaps across Uniswap V2 and V3 protocols
-/// @dev This contract implements the core swap logic and callbacks for both Uniswap versions
-abstract contract SwapExecutor is OnchainRouterImmutables {
+import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
+import {IUnlockCallback} from "v4-core/src/interfaces/callback/IUnlockCallback.sol";
+import {PoolKey} from "v4-core/src/types/PoolKey.sol";
+import {PoolId, PoolIdLibrary} from "v4-core/src/types/PoolId.sol";
+import {Currency} from "v4-core/src/types/Currency.sol";
+import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
+import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
+import {SwapParams as V4SwapParams} from "v4-core/src/types/PoolOperation.sol";
+import {TickMath} from "v4-core/src/libraries/TickMath.sol";
+import {IWETH9} from "../interfaces/IWETH9.sol";
+
+/// @title Swap Executor for Uniswap V2, V3, and V4 Trades
+/// @notice Handles the execution of swaps across Uniswap V2, V3, and V4 protocols
+abstract contract SwapExecutor is OnchainRouterImmutables, IUnlockCallback {
     /// @dev Uniswap V3 pool initialization code hash used for pool address computation
     bytes32 private constant UNISWAP_V3_POOL_INIT_CODE_HASH =
         0xe34f199b19b2b4f47f68442619d555527d244f78a3297ea89325f843f87b8b54;
@@ -38,37 +48,39 @@ abstract contract SwapExecutor is OnchainRouterImmutables {
     using CalldataDecoder for bytes;
     using SafeCast for uint256;
 
-    /// @notice Thrown when a V3 swap is invalid (e.g., zero liquidity)
     error V3InvalidSwap();
-    /// @notice Thrown when V2 swap requires more input tokens than allowed
     error V2TooMuchRequested();
-    /// @notice Thrown when V3 swap requires more input tokens than allowed
     error V3TooMuchRequested();
-    /// @notice Thrown when V3 swap requires more input tokens than allowed
     error TooLittleReceived();
-    /// @notice Thrown when V3 swap returns incorrect output amount
     error V3InvalidAmountOut();
-    /// @notice Thrown when V3 callback is called by unauthorized pool
     error V3InvalidCaller();
+    error V4InvalidCaller();
 
-    /// @notice Executes a swap with exact input amount
-    /// @dev Processes multi-hop swaps sequentially, handling both V2 and V3 pools
-    /// @param quote The quote containing swap path and amount details
-    /// @param recipient The address that will receive the final output tokens
-    /// @return amountOut The amount of output tokens received from the swap
+    /// @notice The intermediate token (WETH) — set by inheriting contract
+    function _intermediateToken() internal view virtual returns (address);
+
+    // ─────────────────────────────────────────────────────────────
+    //  Exact Input
+    // ─────────────────────────────────────────────────────────────
+
     function _swapExactInput(Quote memory quote, address recipient) internal returns (uint256 amountOut) {
+        if (_hasV4Hop(quote)) {
+            bytes memory result = poolManager.unlock(abi.encode(quote, recipient, true));
+            amountOut = abi.decode(result, (uint256));
+        } else {
+            amountOut = _swapExactInputDirect(quote, recipient);
+        }
+    }
+
+    function _swapExactInputDirect(Quote memory quote, address recipient) private returns (uint256 amountOut) {
         uint256 amountIn = quote.amountIn;
         for (uint256 i = 0; i < quote.path.length; i++) {
             Pool memory pool = quote.path[i];
-            // This contract custodies intermediate funds
             address currentRecipient = i < quote.path.length - 1 ? address(this) : recipient;
 
-            // set the next amountIn to the current amountOut
-            if (pool.version) {
-                // v3 swap
+            if (pool.version == V3) {
                 amountIn = _v3SwapExactInput(quote, amountIn, currentRecipient, i);
-            } else {
-                // v2 swap
+            } else if (pool.version == V2) {
                 amountIn = _v2SwapExactInput(pool, amountIn, currentRecipient);
             }
         }
@@ -76,53 +88,207 @@ abstract contract SwapExecutor is OnchainRouterImmutables {
         if (amountOut < quote.amountOut) revert TooLittleReceived();
     }
 
-    /// @notice Executes a swap with exact output amount
-    /// @dev Sets up maximum input amount protection before executing the swap
-    /// @param quote The quote containing swap path and amount details
-    /// @param recipient The address that will receive the output tokens
-    /// @return amountIn The amount of input tokens used for the swap
-    /// @custom:throws V2TooMuchRequested If V2 swap requires more than maximum input
-    /// @custom:throws V3TooMuchRequested If V3 swap requires more than maximum input
+    // ─────────────────────────────────────────────────────────────
+    //  Exact Output
+    // ─────────────────────────────────────────────────────────────
+
     function _swapExactOutput(Quote memory quote, address recipient) internal returns (uint256 amountIn) {
-        MaxInputAmount.set(quote.amountIn);
-        amountIn = _swapExactOutput(quote, quote.amountOut, recipient, quote.path.length - 1);
-        MaxInputAmount.set(0);
+        if (_hasV4Hop(quote)) {
+            bytes memory result = poolManager.unlock(abi.encode(quote, recipient, false));
+            amountIn = abi.decode(result, (uint256));
+        } else {
+            MaxInputAmount.set(quote.amountIn);
+            amountIn = _swapExactOutputHop(quote, quote.amountOut, recipient, quote.path.length - 1);
+            MaxInputAmount.set(0);
+        }
     }
 
-    /// @notice Internal recursive function for exact output swaps
-    /// @dev Processes multi-hop swaps recursively, starting from the last pool
-    /// @param quote The quote containing swap path and amount details
-    /// @param amountOut The exact amount of output tokens required
-    /// @param recipient The address that will receive the output tokens
-    /// @param pathIndex The current index in the swap path
-    /// @return amountIn The amount of input tokens required for this hop
-    /// @custom:throws V2TooMuchRequested If V2 swap requires more than maximum input
-    /// @custom:throws V3TooMuchRequested If V3 swap requires more than maximum input
-    function _swapExactOutput(Quote memory quote, uint256 amountOut, address recipient, uint256 pathIndex)
+    function _swapExactOutputHop(Quote memory quote, uint256 amountOut, address recipient, uint256 pathIndex)
         private
         returns (uint256 amountIn)
     {
         Pool memory pool = quote.path[pathIndex];
-        if (pool.version) {
-            // v3 swap
+        if (pool.version == V3) {
             amountIn = _v3SwapExactOutput(quote, amountOut, recipient, pathIndex);
-        } else {
-            // v2 swap
+        } else if (pool.version == V2) {
             amountIn = _v2SwapExactOutput(quote, amountOut, recipient, pathIndex);
+        } else if (pool.version == V4) {
+            amountIn = _v4SwapExactOutputHop(quote, amountOut, recipient, pathIndex);
         }
     }
 
-    /// @notice Executes a V2 swap with exact input amount
-    /// @dev Handles single-hop V2 swaps, calculating output amount based on reserves
-    /// @param pool The pool information for the swap
-    /// @param amountIn The exact amount of input tokens to swap
-    /// @param recipient The address that will receive the output tokens
-    /// @return amountOut The amount of output tokens received
+    // ─────────────────────────────────────────────────────────────
+    //  V4 Unlock Callback
+    // ─────────────────────────────────────────────────────────────
+
+    function unlockCallback(bytes calldata data) external override returns (bytes memory) {
+        if (msg.sender != address(poolManager)) revert V4InvalidCaller();
+        (Quote memory quote, address recipient, bool isExactInput) = abi.decode(data, (Quote, address, bool));
+
+        if (isExactInput) {
+            return abi.encode(_unlockExactInput(quote, recipient));
+        } else {
+            MaxInputAmount.set(quote.amountIn);
+            uint256 amountIn = _swapExactOutputHop(quote, quote.amountOut, recipient, quote.path.length - 1);
+            MaxInputAmount.set(0);
+            return abi.encode(amountIn);
+        }
+    }
+
+    function _unlockExactInput(Quote memory quote, address recipient) private returns (uint256 amountOut) {
+        uint256 amountIn = quote.amountIn;
+        for (uint256 i = 0; i < quote.path.length; i++) {
+            Pool memory pool = quote.path[i];
+            address currentRecipient = i < quote.path.length - 1 ? address(this) : recipient;
+
+            if (pool.version == V4) {
+                amountIn = _v4SwapExactInput(pool, amountIn, currentRecipient, i < quote.path.length - 1);
+            } else if (pool.version == V3) {
+                amountIn = _v3SwapExactInput(quote, amountIn, currentRecipient, i);
+            } else if (pool.version == V2) {
+                amountIn = _v2SwapExactInput(pool, amountIn, currentRecipient);
+            }
+        }
+        amountOut = amountIn;
+        if (amountOut < quote.amountOut) revert TooLittleReceived();
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    //  V4 Swap Execution
+    // ─────────────────────────────────────────────────────────────
+
+    function _v4SwapExactInput(Pool memory pool, uint256 amountIn, address recipient, bool isIntermediate)
+        private
+        returns (uint256 amountOut)
+    {
+        address weth = _intermediateToken();
+        PoolKey memory key = _buildV4PoolKey(pool);
+        bool zeroForOne = Currency.wrap(pool.tokenIn) < Currency.wrap(pool.tokenOut);
+        Currency inputCurrency = Currency.wrap(pool.tokenIn);
+        Currency outputCurrency = Currency.wrap(pool.tokenOut);
+
+        // Pre-swap: unwrap WETH→ETH if V4 pool uses native ETH for input
+        if (inputCurrency.isAddressZero()) {
+            IWETH9(weth).withdraw(amountIn);
+        }
+
+        // V4 convention: negative amountSpecified = exact input
+        BalanceDelta delta = poolManager.swap(
+            key,
+            V4SwapParams({
+                zeroForOne: zeroForOne,
+                amountSpecified: -int256(amountIn),
+                sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
+            }),
+            ""
+        );
+
+        // Determine actual amounts from delta
+        int128 delta0 = delta.amount0();
+        int128 delta1 = delta.amount1();
+
+        // Settle input (negative delta = we owe pool manager)
+        uint256 inputAmount = uint256(uint128(zeroForOne ? -delta0 : -delta1));
+        _v4Settle(inputCurrency, inputAmount);
+
+        // Take output (positive delta = pool manager owes us)
+        amountOut = uint256(uint128(zeroForOne ? delta1 : delta0));
+        poolManager.take(outputCurrency, isIntermediate ? address(this) : recipient, amountOut);
+
+        // Post-swap: wrap ETH→WETH if output is native ETH and we need ERC20 for next hop
+        if (outputCurrency.isAddressZero() && isIntermediate) {
+            IWETH9(weth).deposit{value: amountOut}();
+        }
+    }
+
+    function _v4SwapExactOutputHop(Quote memory quote, uint256 amountOut, address recipient, uint256 pathIndex)
+        private
+        returns (uint256 amountIn)
+    {
+        Pool memory pool = quote.path[pathIndex];
+        address weth = _intermediateToken();
+        PoolKey memory key = _buildV4PoolKey(pool);
+        bool zeroForOne = Currency.wrap(pool.tokenIn) < Currency.wrap(pool.tokenOut);
+        Currency inputCurrency = Currency.wrap(pool.tokenIn);
+        Currency outputCurrency = Currency.wrap(pool.tokenOut);
+
+        // V4 convention: positive amountSpecified = exact output
+        BalanceDelta delta = poolManager.swap(
+            key,
+            V4SwapParams({
+                zeroForOne: zeroForOne,
+                amountSpecified: int256(amountOut),
+                sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
+            }),
+            ""
+        );
+
+        int128 delta0 = delta.amount0();
+        int128 delta1 = delta.amount1();
+
+        amountIn = uint256(uint128(zeroForOne ? -delta0 : -delta1));
+
+        // Get input tokens: either from previous hop or from initial funds
+        if (pathIndex > 0) {
+            _swapExactOutputHop(quote, amountIn, address(this), pathIndex - 1);
+        } else {
+            if (amountIn > MaxInputAmount.get()) revert V3TooMuchRequested();
+        }
+
+        // Pre-settle: unwrap WETH→ETH if V4 pool uses native ETH for input
+        if (inputCurrency.isAddressZero()) {
+            IWETH9(weth).withdraw(amountIn);
+        }
+
+        // Settle input
+        _v4Settle(inputCurrency, amountIn);
+
+        // Take output
+        uint256 outputAmount = uint256(uint128(zeroForOne ? delta1 : delta0));
+        poolManager.take(outputCurrency, recipient, outputAmount);
+
+        // Post-take: wrap ETH→WETH if recipient is this contract and output is native ETH
+        if (outputCurrency.isAddressZero() && recipient == address(this)) {
+            IWETH9(weth).deposit{value: outputAmount}();
+        }
+    }
+
+    function _v4Settle(Currency currency, uint256 amount) private {
+        if (currency.isAddressZero()) {
+            poolManager.settle{value: amount}();
+        } else {
+            poolManager.sync(currency);
+            SafeTransferLib.safeTransfer(ERC20(Currency.unwrap(currency)), address(poolManager), amount);
+            poolManager.settle();
+        }
+    }
+
+    function _buildV4PoolKey(Pool memory pool) private pure returns (PoolKey memory) {
+        Currency c0 = Currency.wrap(pool.tokenIn);
+        Currency c1 = Currency.wrap(pool.tokenOut);
+        if (c0 > c1) {
+            (c0, c1) = (c1, c0);
+        }
+        return PoolKey({
+            currency0: c0, currency1: c1, fee: pool.fee, tickSpacing: pool.tickSpacing, hooks: IHooks(pool.hooks)
+        });
+    }
+
+    function _hasV4Hop(Quote memory quote) private pure returns (bool) {
+        for (uint256 i = 0; i < quote.path.length; i++) {
+            if (quote.path[i].version == V4) return true;
+        }
+        return false;
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    //  V2 Swap Execution (unchanged)
+    // ─────────────────────────────────────────────────────────────
+
     function _v2SwapExactInput(Pool memory pool, uint256 amountIn, address recipient)
         private
         returns (uint256 amountOut)
     {
-        // Send input funds in
         SafeTransferLib.safeTransfer(ERC20(pool.tokenIn), pool.pool, amountIn);
         IUniswapV2Pair pair = IUniswapV2Pair(pool.pool);
         (address token0,) = UniswapV2Library.sortTokens(pool.tokenIn, pool.tokenOut);
@@ -135,14 +301,10 @@ abstract contract SwapExecutor is OnchainRouterImmutables {
         pair.swap(amount0Out, amount1Out, recipient, new bytes(0));
     }
 
-    /// @notice Executes a V3 swap with exact input amount
-    /// @dev Handles single-hop V3 swaps, using the pool's swap function
-    /// @param quote The quote containing swap path and amount details
-    /// @param amountIn The exact amount of input tokens to swap
-    /// @param recipient The address that will receive the output tokens
-    /// @param pathIndex The current index in the swap path
-    /// @return amountOut The amount of output tokens received
-    /// @custom:throws V3InvalidAmountOut If the received amount doesn't match expected
+    // ─────────────────────────────────────────────────────────────
+    //  V3 Swap Execution (unchanged)
+    // ─────────────────────────────────────────────────────────────
+
     function _v3SwapExactInput(Quote memory quote, uint256 amountIn, address recipient, uint256 pathIndex)
         private
         returns (uint256 amountOut)
@@ -161,14 +323,6 @@ abstract contract SwapExecutor is OnchainRouterImmutables {
         amountOut = zeroForOne ? uint256(-amount1Delta) : uint256(-amount0Delta);
     }
 
-    /// @notice Executes a V3 exact output swap
-    /// @dev Handles single-hop V3 swaps with exact output amount
-    /// @param quote The quote containing swap path and amount details
-    /// @param amountOut The exact output amount required
-    /// @param recipient The address that will receive the output tokens
-    /// @param pathIndex The current index in the swap path
-    /// @return amountIn The amount of input tokens used
-    /// @custom:throws V3InvalidAmountOut If the received amount doesn't match expected
     function _v3SwapExactOutput(Quote memory quote, uint256 amountOut, address recipient, uint256 pathIndex)
         internal
         returns (uint256 amountIn)
@@ -190,14 +344,6 @@ abstract contract SwapExecutor is OnchainRouterImmutables {
         if (amountOutReceived != amountOut) revert V3InvalidAmountOut();
     }
 
-    /// @notice Executes a V2 exact output swap
-    /// @dev Handles single-hop V2 swaps with exact output amount
-    /// @param quote The quote containing swap path and amount details
-    /// @param amountOut The exact output amount required
-    /// @param recipient The address that will receive the output tokens
-    /// @param pathIndex The current index in the swap path
-    /// @return amountIn The amount of input tokens used
-    /// @custom:throws V2TooMuchRequested If input amount exceeds maximum allowed
     function _v2SwapExactOutput(Quote memory quote, uint256 amountOut, address recipient, uint256 pathIndex)
         internal
         returns (uint256 amountIn)
@@ -210,10 +356,8 @@ abstract contract SwapExecutor is OnchainRouterImmutables {
         (uint256 reserveIn, uint256 reserveOut) = pool.tokenIn == token0 ? (reserve0, reserve1) : (reserve1, reserve0);
         amountIn = UniswapV2Library.getAmountIn(amountOut, reserveIn, reserveOut);
 
-        // either initiate the next swap or pay
         if (pathIndex > 0) {
-            // this is an intermediate step so the payer is actually this contract
-            _swapExactOutput(quote, amountOut, pool.pool, pathIndex - 1);
+            _swapExactOutputHop(quote, amountIn, pool.pool, pathIndex - 1);
         } else {
             if (amountIn > MaxInputAmount.get()) revert V2TooMuchRequested();
             SafeTransferLib.safeTransfer(ERC20(pool.tokenIn), pool.pool, amountIn);
@@ -224,17 +368,12 @@ abstract contract SwapExecutor is OnchainRouterImmutables {
         pair.swap(amount0Out, amount1Out, recipient, new bytes(0));
     }
 
-    /// @notice Callback for V3 swaps, required by IUniswapV3SwapCallback
-    /// @dev Handles payment for V3 swaps, either by executing next swap in path or transferring tokens
-    /// @param amount0Delta The amount of token0 being borrowed
-    /// @param amount1Delta The amount of token1 being borrowed
-    /// @param data Encoded quote and path index information
-    /// @custom:throws V3InvalidSwap If swap is entirely within 0-liquidity regions
-    /// @custom:throws V3InvalidCaller If not called by the expected V3 pool
-    /// @custom:throws V3TooMuchRequested If input amount exceeds maximum allowed
-    /// @custom:throws V2TooMuchRequested If V2 swap in path requires more than maximum input
+    // ─────────────────────────────────────────────────────────────
+    //  V3 Callback (unchanged)
+    // ─────────────────────────────────────────────────────────────
+
     function uniswapV3SwapCallback(int256 amount0Delta, int256 amount1Delta, bytes calldata data) external {
-        if (amount0Delta <= 0 && amount1Delta <= 0) revert V3InvalidSwap(); // swaps entirely within 0-liquidity regions are not supported
+        if (amount0Delta <= 0 && amount1Delta <= 0) revert V3InvalidSwap();
         (Quote memory quote, uint256 pathIndex, bool isExactInput) = abi.decode(data, (Quote, uint256, bool));
 
         Pool memory pool = quote.path[pathIndex];
@@ -245,10 +384,8 @@ abstract contract SwapExecutor is OnchainRouterImmutables {
         if (isExactInput) {
             SafeTransferLib.safeTransfer(ERC20(pool.tokenIn), msg.sender, amountToPay);
         } else {
-            // either initiate the next swap or pay
             if (pathIndex > 0) {
-                // this is an intermediate step so the payer is actually this contract
-                _swapExactOutput(quote, amountToPay, msg.sender, pathIndex - 1);
+                _swapExactOutputHop(quote, amountToPay, msg.sender, pathIndex - 1);
             } else {
                 if (amountToPay > MaxInputAmount.get()) revert V3TooMuchRequested();
                 SafeTransferLib.safeTransfer(ERC20(pool.tokenIn), msg.sender, amountToPay);

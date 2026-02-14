@@ -4,7 +4,7 @@ pragma solidity ^0.8.0;
 import {IUniswapV3Factory} from "v3-core/contracts/interfaces/IUniswapV3Factory.sol";
 import {IUniswapV2Factory} from "v2-core/contracts/interfaces/IUniswapV2Factory.sol";
 import {UniswapV2Library} from "../libraries/UniswapV2Library.sol";
-import {Pool} from "./OnchainRouterStructs.sol";
+import {Pool, V2, V3} from "./OnchainRouterStructs.sol";
 import {OnchainRouterImmutables} from "./OnchainRouterImmutables.sol";
 
 /// @title Path Generator for Uniswap V2 and V3 Routes
@@ -48,13 +48,18 @@ abstract contract PathGenerator is OnchainRouterImmutables {
     /// @notice Generates all possible paths between two tokens
     /// @param tokenIn The input token address
     /// @param tokenOut The output token address
-    /// @return paths Array of all valid pools (both V2 and V3) for the token pair
-    /// @dev Combines results from generateV2Path and generateV3Paths
+    /// @return paths Array of all valid pools (V2, V3, and V4) for the token pair
     function generatePaths(address tokenIn, address tokenOut) internal view returns (Pool[] memory paths) {
         Pool[] memory v2Path = generateV2Path(tokenIn, tokenOut);
         Pool[] memory v3Paths = generateV3Paths(tokenIn, tokenOut);
+        Pool[] memory v4Paths = generateV4Paths(tokenIn, tokenOut);
 
-        paths = addPaths(v2Path, v3Paths);
+        paths = addPaths(addPaths(v2Path, v3Paths), v4Paths);
+    }
+
+    /// @notice Override to provide V4 paths from V4PoolRegistry
+    function generateV4Paths(address, address) internal view virtual returns (Pool[] memory paths) {
+        paths = new Pool[](0);
     }
 
     /// @notice Generates all valid V3 paths for a token pair
@@ -72,7 +77,15 @@ abstract contract PathGenerator is OnchainRouterImmutables {
             address pool = v3Factory.getPool(token0, token1, feeTier);
 
             if (pool != address(0)) {
-                Pool memory path = Pool({tokenIn: tokenIn, tokenOut: tokenOut, pool: pool, fee: feeTier, version: true});
+                Pool memory path = Pool({
+                    tokenIn: tokenIn,
+                    tokenOut: tokenOut,
+                    pool: pool,
+                    fee: feeTier,
+                    version: V3,
+                    tickSpacing: 0,
+                    hooks: address(0)
+                });
                 paths[validPaths] = path;
                 validPaths++;
             }
@@ -94,7 +107,15 @@ abstract contract PathGenerator is OnchainRouterImmutables {
 
         path = new Pool[](1);
         if (v2Pool != address(0)) {
-            path[0] = Pool({tokenIn: tokenIn, tokenOut: tokenOut, pool: v2Pool, fee: V2_FEE_TIER, version: false});
+            path[0] = Pool({
+                tokenIn: tokenIn,
+                tokenOut: tokenOut,
+                pool: v2Pool,
+                fee: V2_FEE_TIER,
+                version: V2,
+                tickSpacing: 0,
+                hooks: address(0)
+            });
         } else {
             // set paths length to 0
             assembly {

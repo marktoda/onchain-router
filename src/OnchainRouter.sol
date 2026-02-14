@@ -8,45 +8,61 @@ import {IFeeOnTransferDetector} from "../src/interfaces/IFeeOnTransferDetector.s
 import {UniswapV2Library} from "./libraries/UniswapV2Library.sol";
 import {PathGenerator} from "./base/PathGenerator.sol";
 import {QuoteLibrary} from "./libraries/QuoteLibrary.sol";
-import {SwapParams, Pool, SwapHop, Quote} from "./base/OnchainRouterStructs.sol";
+import {SwapParams, Pool, SwapHop, Quote, V2, V3, V4} from "./base/OnchainRouterStructs.sol";
 import {OnchainRouterImmutables} from "./base/OnchainRouterImmutables.sol";
 import {IV3Quoter} from "./interfaces/IV3Quoter.sol";
 import {V3Quoter} from "./V3Quoter.sol";
 import {V2Quoter} from "./V2Quoter.sol";
+import {V4Quoter} from "./V4Quoter.sol";
 import {IWETH9} from "./interfaces/IWETH9.sol";
 import {SafeTransferLib} from "solmate/src/utils/SafeTransferLib.sol";
 import {ERC20} from "solmate/src/tokens/ERC20.sol";
 import {SwapExecutor} from "./base/SwapExecutor.sol";
+import {V4PoolRegistry} from "./base/V4PoolRegistry.sol";
 
-/// @title Onchain Router for Uniswap V2 and V3
-/// @notice Finds and executes optimal swap paths across Uniswap V2 and V3 pools
-/// @dev Combines V2Quoter, V3Quoter, and PathGenerator functionality for best pricing
-contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, PathGenerator, SwapExecutor {
+/// @title Onchain Router for Uniswap V2, V3, and V4
+/// @notice Finds and executes optimal swap paths across Uniswap V2, V3, and V4 pools
+contract OnchainRouter is
+    OnchainRouterImmutables,
+    V3Quoter,
+    V2Quoter,
+    V4Quoter,
+    PathGenerator,
+    V4PoolRegistry,
+    SwapExecutor
+{
     using QuoteLibrary for Quote;
     using QuoteLibrary for Pool;
 
-    /// @notice The intermediate token address used for intermediary swaps
-    /// @dev Used when direct pools don't exist between tokens
     address public immutable intermediateToken;
 
     error DeadlineExpired();
     error InsufficientETH();
 
-    constructor(address _v2Factory, address _v3Factory, address _intermediateToken)
-        OnchainRouterImmutables(_v2Factory, _v3Factory)
+    constructor(address _v2Factory, address _v3Factory, address _poolManager, address _weth)
+        OnchainRouterImmutables(_v2Factory, _v3Factory, _poolManager)
         PathGenerator(_v3Factory)
+        V4PoolRegistry()
     {
-        intermediateToken = _intermediateToken;
+        intermediateToken = _weth;
     }
 
     receive() external payable {}
 
-    /// @notice Executes an exact input swap using a previously quoted route
-    /// @param quote The quote obtained from routeExactInput
-    /// @param recipient The address that will receive the output tokens
-    /// @param deadline The unix timestamp after which the swap will revert
-    /// @param unwrapOutput If true, unwraps WETH output to ETH before sending to recipient
-    /// @return amountOut The amount of output tokens received
+    /// @notice Override to provide WETH address to SwapExecutor
+    function _intermediateToken() internal view override returns (address) {
+        return intermediateToken;
+    }
+
+    /// @notice Override to generate V4 pool paths from the registry
+    function generateV4Paths(address tokenIn, address tokenOut) internal view override returns (Pool[] memory paths) {
+        return getV4Pools(tokenIn, tokenOut, intermediateToken);
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    //  Swap Execution (with V4 score tracking)
+    // ─────────────────────────────────────────────────────────────
+
     function swapExactInput(Quote memory quote, address recipient, uint256 deadline, bool unwrapOutput)
         external
         payable
@@ -57,13 +73,14 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, PathGener
         if (msg.value > 0) {
             IWETH9(intermediateToken).deposit{value: msg.value}();
         } else {
-            SafeTransferLib.safeTransferFrom(
-                ERC20(quote.path[0].tokenIn), msg.sender, address(this), quote.amountIn
-            );
+            SafeTransferLib.safeTransferFrom(ERC20(quote.path[0].tokenIn), msg.sender, address(this), quote.amountIn);
         }
 
         address swapRecipient = unwrapOutput ? address(this) : recipient;
         amountOut = _swapExactInput(quote, swapRecipient);
+
+        // Increment V4 leaderboard scores for winning V4 hops
+        _updateV4Scores(quote);
 
         if (unwrapOutput) {
             IWETH9(intermediateToken).withdraw(amountOut);
@@ -71,12 +88,6 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, PathGener
         }
     }
 
-    /// @notice Executes an exact output swap using a previously quoted route
-    /// @param quote The quote obtained from routeExactOutput
-    /// @param recipient The address that will receive the output tokens
-    /// @param deadline The unix timestamp after which the swap will revert
-    /// @param unwrapOutput If true, unwraps WETH output to ETH before sending to recipient
-    /// @return amountIn The actual amount of input tokens consumed
     function swapExactOutput(Quote memory quote, address recipient, uint256 deadline, bool unwrapOutput)
         external
         payable
@@ -87,13 +98,14 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, PathGener
         if (msg.value > 0) {
             IWETH9(intermediateToken).deposit{value: msg.value}();
         } else {
-            SafeTransferLib.safeTransferFrom(
-                ERC20(quote.path[0].tokenIn), msg.sender, address(this), quote.amountIn
-            );
+            SafeTransferLib.safeTransferFrom(ERC20(quote.path[0].tokenIn), msg.sender, address(this), quote.amountIn);
         }
 
         address swapRecipient = unwrapOutput ? address(this) : recipient;
         amountIn = _swapExactOutput(quote, swapRecipient);
+
+        // Increment V4 leaderboard scores for winning V4 hops
+        _updateV4Scores(quote);
 
         if (unwrapOutput) {
             uint256 outputAmount = quote.amountOut;
@@ -101,7 +113,6 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, PathGener
             SafeTransferLib.safeTransferETH(recipient, outputAmount);
         }
 
-        // Refund excess input
         uint256 excess = quote.amountIn - amountIn;
         if (excess > 0) {
             if (msg.value > 0) {
@@ -113,10 +124,20 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, PathGener
         }
     }
 
-    /// @notice Finds the optimal route for an exact input swap
-    /// @param params The swap parameters including input token, output token, and input amount
-    /// @return bestQuote The optimal quote containing path and output amount
-    /// @dev Tries both direct routes and routes through intermediateToken
+    function _updateV4Scores(Quote memory quote) private {
+        for (uint256 i = 0; i < quote.path.length; i++) {
+            Pool memory pool = quote.path[i];
+            if (pool.version == V4) {
+                bytes32 ph = _pairHash(pool.tokenIn, pool.tokenOut);
+                _incrementV4Score(ph, pool.fee, pool.tickSpacing, pool.hooks);
+            }
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    //  Routing (3-way version checks)
+    // ─────────────────────────────────────────────────────────────
+
     function routeExactInput(SwapParams memory params) public view returns (Quote memory bestQuote) {
         if (params.tokenIn == intermediateToken || params.tokenOut == intermediateToken) {
             return routeExactInputSingle(params);
@@ -127,10 +148,6 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, PathGener
         return multi.better(single);
     }
 
-    /// @notice Finds the optimal route for an exact output swap
-    /// @param params The swap parameters including input token, output token, and desired output amount
-    /// @return bestQuote The optimal quote containing path and required input amount
-    /// @dev Tries both direct routes and routes through intermediateToken
     function routeExactOutput(SwapParams memory params) public view returns (Quote memory bestQuote) {
         if (params.tokenIn == intermediateToken || params.tokenOut == intermediateToken) {
             return routeExactOutputSingle(params);
@@ -141,11 +158,6 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, PathGener
         return multi.better(single);
     }
 
-    /// @notice Finds the best route through an intermediate token for exact input swaps
-    /// @param params The swap parameters
-    /// @param intermediate The intermediate token address (usually intermediateToken)
-    /// @return bestQuote The optimal multi-hop quote
-    /// @dev Combines two single-hop swaps through the intermediate token
     function routeExactInputMulti(SwapParams memory params, address intermediate)
         internal
         view
@@ -162,11 +174,6 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, PathGener
         bestQuote = inputToIntermediate.combine(intermediateToOutput);
     }
 
-    /// @notice Finds the best route through an intermediate token for exact output swaps
-    /// @param params The swap parameters
-    /// @param intermediate The intermediate token address (usually intermediateToken)
-    /// @return bestQuote The optimal multi-hop quote
-    /// @dev Works backwards from desired output amount
     function routeExactOutputMulti(SwapParams memory params, address intermediate)
         internal
         view
@@ -184,17 +191,16 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, PathGener
         bestQuote = intermediateToInput.combine(outputToIntermediate);
     }
 
-    /// @notice Finds the best single pool for an exact input swap
-    /// @param params The swap parameters
-    /// @return bestQuote The optimal single-hop quote
-    /// @dev Tries all available pools (V2 and V3) for the token pair
     function routeExactInputSingle(SwapParams memory params) internal view returns (Quote memory bestQuote) {
         Pool[] memory pools = generatePaths(params.tokenIn, params.tokenOut);
 
         for (uint256 i = 0; i < pools.length; i++) {
             Pool memory pool = pools[i];
             SwapHop memory swap = SwapHop({pool: pool, amountSpecified: params.amountSpecified});
-            uint256 amountOut = pool.version ? v3QuoteExactIn(swap) : v2QuoteExactIn(swap);
+            uint256 amountOut;
+            if (pool.version == V4) amountOut = v4QuoteExactIn(swap);
+            else if (pool.version == V3) amountOut = v3QuoteExactIn(swap);
+            else amountOut = v2QuoteExactIn(swap);
 
             if (bestQuote.amountOut == 0 || amountOut > bestQuote.amountOut) {
                 bestQuote = pool.createQuoteSingle(params.amountSpecified, amountOut);
@@ -202,17 +208,16 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, PathGener
         }
     }
 
-    /// @notice Finds the best single pool for an exact output swap
-    /// @param params The swap parameters
-    /// @return bestQuote The optimal single-hop quote
-    /// @dev Tries all available pools (V2 and V3) for the token pair
     function routeExactOutputSingle(SwapParams memory params) internal view returns (Quote memory bestQuote) {
         Pool[] memory pools = generatePaths(params.tokenIn, params.tokenOut);
 
         for (uint256 i = 0; i < pools.length; i++) {
             Pool memory pool = pools[i];
             SwapHop memory swap = SwapHop({pool: pool, amountSpecified: params.amountSpecified});
-            uint256 amountIn = pool.version ? v3QuoteExactOut(swap) : v2QuoteExactOut(swap);
+            uint256 amountIn;
+            if (pool.version == V4) amountIn = v4QuoteExactOut(swap);
+            else if (pool.version == V3) amountIn = v3QuoteExactOut(swap);
+            else amountIn = v2QuoteExactOut(swap);
 
             if (bestQuote.amountIn == 0 || amountIn < bestQuote.amountIn) {
                 bestQuote = pool.createQuoteSingle(amountIn, params.amountSpecified);

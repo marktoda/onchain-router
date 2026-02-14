@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.0;
 
-/// @title Core structs for Onchain Router
-/// @notice Defines the main data structures used throughout the router
+// Core structs for Onchain Router
+// Defines the main data structures used throughout the router
+
+uint8 constant V2 = 0;
+uint8 constant V3 = 1;
+uint8 constant V4 = 2;
 
 /// @notice Parameters for a swap operation
 /// @dev Used for both exact input and exact output swaps
@@ -15,18 +19,22 @@ struct SwapParams {
     uint256 amountSpecified;
 }
 
-/// @notice Represents a liquidity pool (V2 or V3)
+/// @notice Represents a liquidity pool (V2, V3, or V4)
 struct Pool {
-    // input token for this specific swap
+    // input token for this specific swap (address(0) for native ETH in V4)
     address tokenIn;
-    // output token for this specific swap
+    // output token for this specific swap (address(0) for native ETH in V4)
     address tokenOut;
-    // fee tier (0 for V2, actual fee for V3)
+    // fee tier (0 for V2, actual fee for V3/V4)
     uint24 fee;
-    // pool contract address
+    // pool contract address (zero for V4 — pools live inside poolManager)
     address pool;
-    // this is a V3 pool (true) or V2 pool (false)
-    bool version;
+    // 0=V2, 1=V3, 2=V4
+    uint8 version;
+    // tick spacing (0 for V2/V3, actual value for V4)
+    int24 tickSpacing;
+    // hooks contract address (address(0) for V2/V3 and hookless V4 pools)
+    address hooks;
 }
 
 /// @notice A single step in a swap path

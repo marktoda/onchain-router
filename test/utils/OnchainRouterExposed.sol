@@ -5,7 +5,9 @@ import {OnchainRouter} from "../../src/OnchainRouter.sol";
 import {SwapHop, SwapParams, Quote, Pool} from "../../src/base/OnchainRouterStructs.sol";
 
 contract OnchainRouterExposed is OnchainRouter {
-    constructor(address _v2Factory, address _v3Factory, address _weth) OnchainRouter(_v2Factory, _v3Factory, _weth) {}
+    constructor(address _v2Factory, address _v3Factory, address _poolManager, address _weth)
+        OnchainRouter(_v2Factory, _v3Factory, _poolManager, _weth)
+    {}
 
     /// @notice finds all routes from input to intermediate and from intermediate to output
     /// @dev returns the best route
