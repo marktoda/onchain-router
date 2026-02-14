@@ -33,6 +33,14 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter,
     //  Swap Execution (with V4 score tracking)
     // ─────────────────────────────────────────────────────────────
 
+    /// @notice Execute an exact-input swap using a previously obtained quote.
+    /// @dev Send ETH as msg.value for native ETH input (wraps to WETH automatically).
+    /// Set unwrapOutput=true to receive ETH instead of WETH.
+    /// @param quote Quote from routeExactInput containing path and amounts
+    /// @param recipient Address that receives output tokens
+    /// @param deadline Unix timestamp after which the swap reverts
+    /// @param unwrapOutput If true, unwraps WETH output to native ETH
+    /// @return amountOut Actual output amount received
     function swapExactInput(Quote memory quote, address recipient, uint256 deadline, bool unwrapOutput)
         external
         payable
@@ -61,6 +69,12 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter,
         }
     }
 
+    /// @notice Execute an exact-output swap. Excess input is refunded to msg.sender.
+    /// @param quote Quote from routeExactOutput containing path and max input
+    /// @param recipient Address that receives the exact output amount
+    /// @param deadline Unix timestamp after which the swap reverts
+    /// @param unwrapOutput If true, unwraps WETH output to native ETH
+    /// @return amountIn Actual input amount consumed (may be less than quote.amountIn)
     function swapExactOutput(Quote memory quote, address recipient, uint256 deadline, bool unwrapOutput)
         external
         payable
@@ -117,6 +131,9 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter,
     //  Routing (3-way version checks)
     // ─────────────────────────────────────────────────────────────
 
+    /// @notice Find the optimal route for an exact-input swap.
+    /// @dev Compares direct routes and multi-hop routes through intermediateToken.
+    /// For pairs involving intermediateToken, only single-hop is checked.
     function routeExactInput(SwapParams memory params) public view returns (Quote memory bestQuote) {
         if (params.tokenIn == intermediateToken || params.tokenOut == intermediateToken) {
             return routeExactInputSingle(params);
@@ -127,6 +144,7 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter,
         return multi.better(single);
     }
 
+    /// @notice Find the optimal route for an exact-output swap.
     function routeExactOutput(SwapParams memory params) public view returns (Quote memory bestQuote) {
         if (params.tokenIn == intermediateToken || params.tokenOut == intermediateToken) {
             return routeExactOutputSingle(params);

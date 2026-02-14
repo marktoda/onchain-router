@@ -19,7 +19,17 @@ import {TickMath} from "v4-core/src/libraries/TickMath.sol";
 import {IWETH9} from "../interfaces/IWETH9.sol";
 
 /// @title Swap Executor for Uniswap V2, V3, and V4 Trades
-/// @notice Handles the execution of swaps across Uniswap V2, V3, and V4 protocols
+/// @notice Executes multi-hop swaps across V2, V3, and V4 pools.
+/// @dev V4 Strategy: if any hop is V4, the entire swap is wrapped in poolManager.unlock().
+/// Inside the unlock callback, V2/V3 hops execute normally (direct token transfers / V3 callbacks).
+/// V4 hops use poolManager.swap() with flash accounting: settle input, take output.
+///
+/// Native ETH: V4 pools may use Currency.wrap(address(0)) instead of WETH. At V4 hop boundaries,
+/// the executor unwraps WETH→ETH before native ETH settlement and wraps ETH→WETH after native
+/// ETH output when the next hop needs an ERC20.
+///
+/// V4 sign convention: negative amountSpecified = exact input, positive = exact output.
+/// BalanceDelta: negative = owed by swapper (settle), positive = owed to swapper (take).
 abstract contract SwapExecutor is OnchainRouterImmutables, IUnlockCallback {
     uint160 private constant MIN_SQRT_RATIO = 4295128739;
     uint160 private constant MAX_SQRT_RATIO = 1461446703485210103287273052203988822378723970342;
@@ -227,6 +237,7 @@ abstract contract SwapExecutor is OnchainRouterImmutables, IUnlockCallback {
         }
     }
 
+    /// @dev Settle a V4 balance delta. Native ETH: settle{value}. ERC20: sync → transfer → settle.
     function _v4Settle(Currency currency, uint256 amount) private {
         if (currency.isAddressZero()) {
             poolManager.settle{value: amount}();

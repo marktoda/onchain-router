@@ -5,6 +5,7 @@ import {IUniswapV3Factory} from "v3-core/contracts/interfaces/IUniswapV3Factory.
 import {IUniswapV2Factory} from "v2-core/contracts/interfaces/IUniswapV2Factory.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 
+/// @notice Shared immutable protocol addresses for V2, V3, and V4.
 abstract contract OnchainRouterImmutables {
     IUniswapV2Factory public immutable v2Factory;
     IUniswapV3Factory public immutable v3Factory;

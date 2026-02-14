@@ -10,6 +10,9 @@ import {OnchainRouterImmutables} from "./base/OnchainRouterImmutables.sol";
 import {SwapHop} from "./base/OnchainRouterStructs.sol";
 
 /// @title Uniswap V4 Pool Quoter
+/// @notice Simulates V4 swaps offchain by reading pool state via StateLibrary (extsload).
+/// @dev Uses try/catch with 500K gas limit to safely handle pools with extreme tick depth.
+/// Returns 0 (exact-in) or type(uint256).max (exact-out) on failure.
 abstract contract V4Quoter is OnchainRouterImmutables {
     using PoolIdLibrary for PoolKey;
 

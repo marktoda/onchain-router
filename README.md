@@ -1,123 +1,116 @@
 # Onchain Router
 
-A gas-optimized smart contract router for finding optimal swap paths across Uniswap V2 and V3 pools.
+Finds and executes optimal swap paths across Uniswap V2, V3, and V4 pools entirely onchain.
 
-## Overview
+## How it works
 
-The Onchain Router is a smart contract system that:
-- Finds the most efficient swap paths across Uniswap V2 and V3 liquidity pools
-- Supports both exact input and exact output swaps
-- Handles single-hop and multi-hop trades
-- Optimizes for gas usage by doing path finding onchain
-- Supports all fee tiers in Uniswap V3 (0.01%, 0.05%, 0.3%, 1%)
+```
+User: swapExactInput(USDC -> WBTC, 1000 USDC)
+
+1. DISCOVER  PathGenerator finds all pools for each hop:
+             USDC/WETH: V2 pool, V3 pools (4 fee tiers), V4 pools (4 default configs + leaderboard)
+             WETH/WBTC: same search
+
+2. QUOTE     Each pool is simulated via tick-by-tick math (V3/V4) or reserves (V2).
+             Best single-hop and multi-hop routes are compared.
+
+3. EXECUTE   Winner executes: V2 via pair.swap(), V3 via pool.swap(),
+             V4 via poolManager.unlock() → swap() → settle/take.
+```
 
 ## Architecture
 
-The system consists of several key components:
+```
+OnchainRouterImmutables          Shared immutables: v2Factory, v3Factory, poolManager, intermediateToken
+    ├── V4PoolRegistry           V4 pool discovery: default configs + per-pair leaderboard (max 8)
+    │   └── PathGenerator        Discovers all V2/V3/V4 pools for a token pair
+    ├── SwapExecutor             Executes swaps across V2/V3/V4 (implements IUnlockCallback)
+    ├── V2Quoter                 Simulates V2 swaps via reserve math
+    ├── V3Quoter                 Simulates V3 swaps via tick-by-tick traversal
+    └── V4Quoter                 Simulates V4 swaps via StateLibrary (extsload)
+            │
+            └── OnchainRouter    Entry point: routing + execution + ETH wrapping
+```
 
-### Core Contracts
+### V4 Pool Discovery
 
-- `OnchainRouter.sol`: Main router contract that coordinates path finding and execution
-- `V3Quoter.sol`: Handles quoting and simulation of V3 pool swaps
-- `V2Quoter.sol`: Handles quoting and simulation of V2 pool swaps
+V4 pools are identified by `PoolKey(currency0, currency1, fee, tickSpacing, hooks)` — 5 dimensions with no registry. The router uses two discovery mechanisms:
 
-### Libraries
+- **Default configs**: standard `(fee, tickSpacing)` combos `(100,1), (500,10), (3000,60), (10000,200)` with `hooks=address(0)`, checked for every pair
+- **Leaderboard**: max 8 registered pools per pair with win-counter scoring. Anyone can register pools via `registerV4Pool()`. When full, challengers must have more liquidity than the lowest-scored incumbent.
 
-- `QuoterMath.sol`: Core math for computing swap amounts and prices
-- `PoolTickBitmap.sol`: Efficient tick bitmap operations for V3 pools
-- `PoolAddress.sol`: Computing pool addresses deterministically
+### Native ETH in V4
 
-## Features
+V4 pools can use `Currency.wrap(address(0))` (native ETH) instead of WETH. The router handles this transparently:
 
-- **Optimal Path Finding**: Automatically finds the best path for trades across both V2 and V3 pools
-- **Gas Efficiency**: Performs all routing logic onchain without external oracle dependencies
-- **Multi-Pool Support**: Can route through multiple pools to achieve better pricing
-- **Fee Tier Optimization**: Automatically selects the most efficient fee tier for V3 swaps
-- **Exact Output Swaps**: Supports specifying exact output amounts for trades
-- **Slippage Protection**: Built-in slippage checks and limits
+- **Discovery**: when `intermediateToken` (WETH) is one of the tokens, the registry also checks for `address(0)` variants
+- **Execution**: WETH is unwrapped to ETH before V4 native ETH settlement, and ETH is wrapped back to WETH after V4 native ETH output when needed for subsequent V2/V3 hops
+- **Entry point**: `_resolveUserToken()` maps `address(0)` back to WETH for user-facing `transferFrom`/refund
 
-## Installation
+### V4 Swap Execution
+
+If any hop in the path is V4, the entire execution is wrapped in `poolManager.unlock()`:
+
+```
+poolManager.unlock(data)
+  └── unlockCallback(data)
+        ├── V2 hop: transfer tokens → pair.swap()
+        ├── V3 hop: pool.swap() → uniswapV3SwapCallback → transfer tokens
+        └── V4 hop: poolManager.swap() → settle(input) → take(output)
+```
+
+V2/V3 hops work normally inside the unlock callback — they don't interact with V4's accounting.
+
+## Deployment
+
+Target chain: **Base**
+
+```
+V2 Factory:   0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6
+V3 Factory:   0x33128a8fC17869897dcE68Ed026d694621f6FDfD
+PoolManager:  0x498581fF718922c3f8e6A244956aF099B2652b2b
+WETH:         0x4200000000000000000000000000000000000006
+```
 
 ```bash
-forge install
+forge script script/DeployOnchainRouter.s.sol --broadcast --rpc-url $BASE_RPC_URL
+```
+
+## Usage
+
+```solidity
+// 1. Get a quote
+SwapParams memory params = SwapParams({
+    tokenIn: USDC,
+    tokenOut: WETH,
+    amountSpecified: 1000e6
+});
+Quote memory quote = router.routeExactInput(params);
+
+// 2. Execute (ERC20 input)
+USDC.approve(address(router), quote.amountIn);
+uint256 amountOut = router.swapExactInput(quote, recipient, deadline, false);
+
+// 2b. Execute (ETH input, unwrap output to ETH)
+uint256 amountOut = router.swapExactInput{value: msg.value}(quote, recipient, deadline, true);
 ```
 
 ## Testing
 
-The project includes both unit tests and fork tests:
-
 ```bash
-# Run all tests
-forge test
+# V2/V3 tests (Ethereum mainnet fork)
+MAINNET_RPC_URL=... forge test --match-contract "RouterForkTest|SwapExecutionForkTest"
 
-# Run with verbosity for debugging
-forge test -vvv
+# V4 tests (Base fork)
+BASE_RPC_URL=... forge test --match-contract V4BaseForkTest
 
-# Run fork tests (requires MAINNET_RPC_URL)
-forge test --fork-url $MAINNET_RPC_URL
+# V4 leaderboard unit tests (no fork needed)
+forge test --match-contract V4LeaderboardTest
+
+# All tests
+MAINNET_RPC_URL=... BASE_RPC_URL=... forge test
 ```
-
-### Test Coverage
-
-- Unit tests cover core routing logic and edge cases
-- Fork tests verify behavior against mainnet pools
-- Tests include both exact input and exact output scenarios
-- Coverage for different token decimals and fee tiers
-
-## Usage
-
-### Basic Swap Example
-
-```solidity
-// Create swap parameters
-SwapParams memory params = SwapParams({
-    tokenIn: USDC,
-    tokenOut: WETH,
-    amountSpecified: 1000e6 // 1000 USDC
-});
-
-// Get quote for swap
-Quote memory quote = router.routeExactInput(params);
-
-// Execute swap (implementation depends on your needs)
-router.executeSwap(quote);
-```
-
-### Advanced Usage
-
-```solidity
-// Example with custom fee tiers
-router.addNewFeeTier(100); // Add 0.01% fee tier
-
-// Multi-hop example
-SwapParams memory params = SwapParams({
-    tokenIn: USDC,
-    tokenOut: WBTC,
-    amountSpecified: 1000e6
-});
-
-Quote memory quote = router.routeExactInput(params);
-// Quote will contain optimal path through multiple pools
-```
-
-## Security Considerations
-
-- All math operations use safe math to prevent overflows
-- Slippage protection built into core swap functions
-- Gas limits on quote computation to prevent DOS
-- Reentrancy protection on state-modifying functions
-
-## Contributing
-
-Contributions are welcome! Please check out our [Contributing Guide](CONTRIBUTING.md).
 
 ## License
 
 GPL-2.0-or-later
-
-## Acknowledgments
-
-Built with:
-- [Foundry](https://github.com/foundry-rs/foundry)
-- [Uniswap V2](https://github.com/Uniswap/v2-core)
-- [Uniswap V3](https://github.com/Uniswap/v3-core)

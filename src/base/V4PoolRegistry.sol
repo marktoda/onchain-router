@@ -10,6 +10,10 @@ import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
 import {Pool, V4} from "./OnchainRouterStructs.sol";
 import {OnchainRouterImmutables} from "./OnchainRouterImmutables.sol";
 
+/// @notice Discovers V4 pools via default fee/tickSpacing configs and a per-pair leaderboard.
+/// @dev Default configs check standard (fee, tickSpacing) combos with hooks=address(0).
+/// The leaderboard holds up to 8 registered pools per pair with win-counter scoring.
+/// When full, new pools must have more liquidity than the lowest-scored incumbent.
 abstract contract V4PoolRegistry is OnchainRouterImmutables {
     using StateLibrary for IPoolManager;
     using PoolIdLibrary for PoolKey;
@@ -38,6 +42,9 @@ abstract contract V4PoolRegistry is OnchainRouterImmutables {
         defaultV4Configs.push(V4PoolConfig({fee: 10000, tickSpacing: 200}));
     }
 
+    /// @notice Register a V4 pool to the leaderboard. Permissionless.
+    /// @dev Pool must exist (sqrtPriceX96 != 0). If leaderboard is full, challenger must
+    /// have more liquidity than the lowest-scored incumbent to replace it.
     function registerV4Pool(address tokenA, address tokenB, uint24 fee, int24 tickSpacing, address hooks) external {
         PoolKey memory key = _buildPoolKey(tokenA, tokenB, fee, tickSpacing, hooks);
         PoolId poolId = key.toId();
