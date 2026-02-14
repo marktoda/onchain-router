@@ -18,19 +18,10 @@ import {IWETH9} from "./interfaces/IWETH9.sol";
 import {SafeTransferLib} from "solmate/src/utils/SafeTransferLib.sol";
 import {ERC20} from "solmate/src/tokens/ERC20.sol";
 import {SwapExecutor} from "./base/SwapExecutor.sol";
-import {V4PoolRegistry} from "./base/V4PoolRegistry.sol";
 
 /// @title Onchain Router for Uniswap V2, V3, and V4
 /// @notice Finds and executes optimal swap paths across Uniswap V2, V3, and V4 pools
-contract OnchainRouter is
-    OnchainRouterImmutables,
-    V3Quoter,
-    V2Quoter,
-    V4Quoter,
-    PathGenerator,
-    V4PoolRegistry,
-    SwapExecutor
-{
+contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter, PathGenerator, SwapExecutor {
     using QuoteLibrary for Quote;
     using QuoteLibrary for Pool;
 
@@ -40,14 +31,9 @@ contract OnchainRouter is
     constructor(address _v2Factory, address _v3Factory, address _poolManager, address _weth)
         OnchainRouterImmutables(_v2Factory, _v3Factory, _poolManager, _weth)
         PathGenerator(_v3Factory)
-        V4PoolRegistry()
     {}
 
     receive() external payable {}
-
-    function generateV4Paths(address tokenIn, address tokenOut) internal view override returns (Pool[] memory paths) {
-        return getV4Pools(tokenIn, tokenOut);
-    }
 
     // ─────────────────────────────────────────────────────────────
     //  Swap Execution (with V4 score tracking)
