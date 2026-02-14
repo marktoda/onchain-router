@@ -9,10 +9,12 @@ abstract contract OnchainRouterImmutables {
     IUniswapV2Factory public immutable v2Factory;
     IUniswapV3Factory public immutable v3Factory;
     IPoolManager public immutable poolManager;
+    address public immutable intermediateToken;
 
-    constructor(address _v2Factory, address _v3Factory, address _poolManager) {
+    constructor(address _v2Factory, address _v3Factory, address _poolManager, address _intermediateToken) {
         v2Factory = IUniswapV2Factory(_v2Factory);
         v3Factory = IUniswapV3Factory(_v3Factory);
         poolManager = IPoolManager(_poolManager);
+        intermediateToken = _intermediateToken;
     }
 }

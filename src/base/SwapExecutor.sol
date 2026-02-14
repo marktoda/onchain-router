@@ -51,13 +51,11 @@ abstract contract SwapExecutor is OnchainRouterImmutables, IUnlockCallback {
     error V3InvalidSwap();
     error V2TooMuchRequested();
     error V3TooMuchRequested();
+    error V4TooMuchRequested();
     error TooLittleReceived();
     error V3InvalidAmountOut();
     error V3InvalidCaller();
     error V4InvalidCaller();
-
-    /// @notice The intermediate token (WETH) — set by inheriting contract
-    function _intermediateToken() internal view virtual returns (address);
 
     // ─────────────────────────────────────────────────────────────
     //  Exact Input
@@ -161,7 +159,7 @@ abstract contract SwapExecutor is OnchainRouterImmutables, IUnlockCallback {
         private
         returns (uint256 amountOut)
     {
-        address weth = _intermediateToken();
+        address weth = intermediateToken;
         PoolKey memory key = _buildV4PoolKey(pool);
         bool zeroForOne = Currency.wrap(pool.tokenIn) < Currency.wrap(pool.tokenOut);
         Currency inputCurrency = Currency.wrap(pool.tokenIn);
@@ -206,7 +204,7 @@ abstract contract SwapExecutor is OnchainRouterImmutables, IUnlockCallback {
         returns (uint256 amountIn)
     {
         Pool memory pool = quote.path[pathIndex];
-        address weth = _intermediateToken();
+        address weth = intermediateToken;
         PoolKey memory key = _buildV4PoolKey(pool);
         bool zeroForOne = Currency.wrap(pool.tokenIn) < Currency.wrap(pool.tokenOut);
         Currency inputCurrency = Currency.wrap(pool.tokenIn);
@@ -232,7 +230,7 @@ abstract contract SwapExecutor is OnchainRouterImmutables, IUnlockCallback {
         if (pathIndex > 0) {
             _swapExactOutputHop(quote, amountIn, address(this), pathIndex - 1);
         } else {
-            if (amountIn > MaxInputAmount.get()) revert V3TooMuchRequested();
+            if (amountIn > MaxInputAmount.get()) revert V4TooMuchRequested();
         }
 
         // Pre-settle: unwrap WETH→ETH if V4 pool uses native ETH for input

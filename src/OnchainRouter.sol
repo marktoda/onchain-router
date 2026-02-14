@@ -34,29 +34,19 @@ contract OnchainRouter is
     using QuoteLibrary for Quote;
     using QuoteLibrary for Pool;
 
-    address public immutable intermediateToken;
-
     error DeadlineExpired();
     error InsufficientETH();
 
     constructor(address _v2Factory, address _v3Factory, address _poolManager, address _weth)
-        OnchainRouterImmutables(_v2Factory, _v3Factory, _poolManager)
+        OnchainRouterImmutables(_v2Factory, _v3Factory, _poolManager, _weth)
         PathGenerator(_v3Factory)
         V4PoolRegistry()
-    {
-        intermediateToken = _weth;
-    }
+    {}
 
     receive() external payable {}
 
-    /// @notice Override to provide WETH address to SwapExecutor
-    function _intermediateToken() internal view override returns (address) {
-        return intermediateToken;
-    }
-
-    /// @notice Override to generate V4 pool paths from the registry
     function generateV4Paths(address tokenIn, address tokenOut) internal view override returns (Pool[] memory paths) {
-        return getV4Pools(tokenIn, tokenOut, intermediateToken);
+        return getV4Pools(tokenIn, tokenOut);
     }
 
     // ─────────────────────────────────────────────────────────────
