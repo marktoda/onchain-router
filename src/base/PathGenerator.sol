@@ -5,6 +5,7 @@ import {IUniswapV3Factory} from "v3-core/contracts/interfaces/IUniswapV3Factory.
 import {IUniswapV2Factory} from "v2-core/contracts/interfaces/IUniswapV2Factory.sol";
 import {UniswapV2Library} from "../libraries/UniswapV2Library.sol";
 import {Pool, V2, V3} from "./OnchainRouterStructs.sol";
+import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {OnchainRouterImmutables} from "./OnchainRouterImmutables.sol";
 import {V4PoolRegistry} from "./V4PoolRegistry.sol";
 
@@ -50,14 +51,9 @@ abstract contract PathGenerator is V4PoolRegistry {
             address pool = v3Factory.getPool(token0, token1, feeTier);
 
             if (pool != address(0)) {
+                PoolKey memory emptyKey;
                 paths[validPaths++] = Pool({
-                    tokenIn: tokenIn,
-                    tokenOut: tokenOut,
-                    pool: pool,
-                    fee: feeTier,
-                    version: V3,
-                    tickSpacing: 0,
-                    hooks: address(0)
+                    tokenIn: tokenIn, tokenOut: tokenOut, fee: feeTier, pool: pool, version: V3, key: emptyKey
                 });
             }
         }
@@ -72,14 +68,9 @@ abstract contract PathGenerator is V4PoolRegistry {
 
         path = new Pool[](1);
         if (v2Pool != address(0)) {
+            PoolKey memory emptyKey;
             path[0] = Pool({
-                tokenIn: tokenIn,
-                tokenOut: tokenOut,
-                pool: v2Pool,
-                fee: V2_FEE_TIER,
-                version: V2,
-                tickSpacing: 0,
-                hooks: address(0)
+                tokenIn: tokenIn, tokenOut: tokenOut, fee: V2_FEE_TIER, pool: v2Pool, version: V2, key: emptyKey
             });
         } else {
             assembly {

@@ -100,7 +100,6 @@ abstract contract V4PoolRegistry is OnchainRouterImmutables {
         }
     }
 
-    /// @notice Checks default configs and leaderboard for a single token pair
     function _findPools(Pool[] memory pools, uint256 count, address tokenIn, address tokenOut)
         private
         view
@@ -112,15 +111,8 @@ abstract contract V4PoolRegistry is OnchainRouterImmutables {
             PoolKey memory key = _buildPoolKey(tokenIn, tokenOut, cfg.fee, cfg.tickSpacing, address(0));
             (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(key.toId());
             if (sqrtPriceX96 != 0) {
-                pools[count++] = Pool({
-                    tokenIn: tokenIn,
-                    tokenOut: tokenOut,
-                    fee: cfg.fee,
-                    pool: address(0),
-                    version: V4,
-                    tickSpacing: cfg.tickSpacing,
-                    hooks: address(0)
-                });
+                pools[count++] =
+                    Pool({tokenIn: tokenIn, tokenOut: tokenOut, fee: 0, pool: address(0), version: V4, key: key});
             }
         }
 
@@ -129,22 +121,14 @@ abstract contract V4PoolRegistry is OnchainRouterImmutables {
         V4PoolEntry[] storage entries = v4Leaderboard[ph];
         for (uint256 i = 0; i < entries.length; i++) {
             V4PoolEntry storage entry = entries[i];
-            // Dedup: skip hookless entries that match a default config
             if (entry.hooks == address(0) && _isDefaultConfig(entry.fee, entry.tickSpacing)) {
                 continue;
             }
             PoolKey memory key = _buildPoolKey(tokenIn, tokenOut, entry.fee, entry.tickSpacing, entry.hooks);
             (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(key.toId());
             if (sqrtPriceX96 != 0) {
-                pools[count++] = Pool({
-                    tokenIn: tokenIn,
-                    tokenOut: tokenOut,
-                    fee: entry.fee,
-                    pool: address(0),
-                    version: V4,
-                    tickSpacing: entry.tickSpacing,
-                    hooks: entry.hooks
-                });
+                pools[count++] =
+                    Pool({tokenIn: tokenIn, tokenOut: tokenOut, fee: 0, pool: address(0), version: V4, key: key});
             }
         }
 

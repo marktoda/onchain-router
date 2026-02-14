@@ -13,7 +13,6 @@ import {OnchainRouterImmutables} from "./OnchainRouterImmutables.sol";
 import {IUnlockCallback} from "v4-core/src/interfaces/callback/IUnlockCallback.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {Currency} from "v4-core/src/types/Currency.sol";
-import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
 import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 import {SwapParams as V4SwapParams} from "v4-core/src/types/PoolOperation.sol";
 import {TickMath} from "v4-core/src/libraries/TickMath.sol";
@@ -137,7 +136,7 @@ abstract contract SwapExecutor is OnchainRouterImmutables, IUnlockCallback {
         returns (uint256 amountOut)
     {
         address weth = intermediateToken;
-        PoolKey memory key = _buildV4PoolKey(pool);
+        PoolKey memory key = pool.key;
         bool zeroForOne = Currency.wrap(pool.tokenIn) < Currency.wrap(pool.tokenOut);
         Currency inputCurrency = Currency.wrap(pool.tokenIn);
         Currency outputCurrency = Currency.wrap(pool.tokenOut);
@@ -182,7 +181,7 @@ abstract contract SwapExecutor is OnchainRouterImmutables, IUnlockCallback {
     {
         Pool memory pool = quote.path[pathIndex];
         address weth = intermediateToken;
-        PoolKey memory key = _buildV4PoolKey(pool);
+        PoolKey memory key = pool.key;
         bool zeroForOne = Currency.wrap(pool.tokenIn) < Currency.wrap(pool.tokenOut);
         Currency inputCurrency = Currency.wrap(pool.tokenIn);
         Currency outputCurrency = Currency.wrap(pool.tokenOut);
@@ -236,17 +235,6 @@ abstract contract SwapExecutor is OnchainRouterImmutables, IUnlockCallback {
             SafeTransferLib.safeTransfer(ERC20(Currency.unwrap(currency)), address(poolManager), amount);
             poolManager.settle();
         }
-    }
-
-    function _buildV4PoolKey(Pool memory pool) private pure returns (PoolKey memory) {
-        Currency c0 = Currency.wrap(pool.tokenIn);
-        Currency c1 = Currency.wrap(pool.tokenOut);
-        if (c0 > c1) {
-            (c0, c1) = (c1, c0);
-        }
-        return PoolKey({
-            currency0: c0, currency1: c1, fee: pool.fee, tickSpacing: pool.tickSpacing, hooks: IHooks(pool.hooks)
-        });
     }
 
     function _hasV4Hop(Quote memory quote) private pure returns (bool) {

@@ -122,7 +122,7 @@ contract V4BaseForkTest is Test {
             if (quote.path[i].version == V4) {
                 hasV4 = true;
                 assertEq(quote.path[i].pool, address(0), "V4 pools should have pool=address(0)");
-                assertTrue(quote.path[i].tickSpacing != 0, "V4 pools should have non-zero tickSpacing");
+                assertTrue(quote.path[i].key.tickSpacing != 0, "V4 pools should have non-zero tickSpacing");
             }
         }
         // V4 might or might not win vs V2/V3, so just log

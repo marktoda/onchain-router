@@ -108,7 +108,7 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter,
             Pool memory pool = quote.path[i];
             if (pool.version == V4) {
                 bytes32 ph = _pairHash(pool.tokenIn, pool.tokenOut);
-                _incrementV4Score(ph, pool.fee, pool.tickSpacing, pool.hooks);
+                _incrementV4Score(ph, pool.key.fee, pool.key.tickSpacing, address(pool.key.hooks));
             }
         }
     }
