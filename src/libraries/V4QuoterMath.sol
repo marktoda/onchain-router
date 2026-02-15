@@ -54,7 +54,7 @@ library V4QuoterMath {
         int256 amount,
         QuoteParams memory quoteParams
     )
-        internal
+        public
         view
         returns (int256 amount0, int256 amount1, uint160 sqrtPriceAfterX96, uint32 initializedTicksCrossed)
     {
