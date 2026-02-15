@@ -5,10 +5,10 @@ import {Script, console2} from "forge-std/Script.sol";
 import {OnchainRouter} from "../src/OnchainRouter.sol";
 
 contract DeployOnchainRouter is Script {
-    address constant v2Factory = 0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6;
-    address constant v3Factory = 0x33128a8fC17869897dcE68Ed026d694621f6FDfD;
-    address constant poolManager = 0x498581fF718922c3f8e6A244956aF099B2652b2b;
-    address constant weth = 0x4200000000000000000000000000000000000006;
+    address constant v2Factory = 0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f;
+    address constant v3Factory = 0x1F98431c8aD98523631AE4a59f267346ea31F984;
+    address constant poolManager = 0x000000000004444c5dc75cB358380D2e3dE08A90;
+    address constant weth = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
 
     function setUp() public {}
 
