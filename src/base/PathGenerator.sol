@@ -52,9 +52,8 @@ abstract contract PathGenerator is V4PoolRegistry {
 
             if (pool != address(0)) {
                 PoolKey memory emptyKey;
-                paths[validPaths++] = Pool({
-                    tokenIn: tokenIn, tokenOut: tokenOut, fee: feeTier, pool: pool, version: V3, key: emptyKey
-                });
+                paths[validPaths++] =
+                    Pool({tokenIn: tokenIn, tokenOut: tokenOut, fee: feeTier, pool: pool, version: V3, key: emptyKey});
             }
         }
         assembly {

@@ -367,7 +367,9 @@ contract V4LeaderboardTest is Test {
         bytes32 stateSlot = keccak256(abi.encodePacked(poolId, bytes32(uint256(6))));
         bytes32 liquiditySlot = bytes32(uint256(stateSlot) + 3);
         vm.mockCall(
-            POOL_MANAGER, abi.encodeWithSignature("extsload(bytes32)", liquiditySlot), abi.encode(bytes32(uint256(liquidity)))
+            POOL_MANAGER,
+            abi.encodeWithSignature("extsload(bytes32)", liquiditySlot),
+            abi.encode(bytes32(uint256(liquidity)))
         );
     }
 }

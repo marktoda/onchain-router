@@ -53,11 +53,7 @@ library V4QuoterMath {
         int24 tickSpacing,
         int256 amount,
         QuoteParams memory quoteParams
-    )
-        public
-        view
-        returns (int256 amount0, int256 amount1, uint160 sqrtPriceAfterX96, uint32 initializedTicksCrossed)
-    {
+    ) public view returns (int256 amount0, int256 amount1, uint160 sqrtPriceAfterX96, uint32 initializedTicksCrossed) {
         QuoteContext memory ctx = QuoteContext({manager: manager, poolId: poolId, tickSpacing: tickSpacing});
         (amount0, amount1, sqrtPriceAfterX96, initializedTicksCrossed) = _quoteInternal(ctx, amount, quoteParams);
     }
