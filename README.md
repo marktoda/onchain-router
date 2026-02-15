@@ -61,19 +61,23 @@ poolManager.unlock(data)
 
 V2/V3 hops work normally inside the unlock callback — they don't interact with V4's accounting.
 
-## Deployment
+## Deployments
 
-Target chain: **Base**
+| Chain | OnchainRouter |
+|-------|---------------|
+| Base | [`0xCa7a19BD1E260DCd92B17DdAc068C2bF67539a02`](https://basescan.org/address/0xCa7a19BD1E260DCd92B17DdAc068C2bF67539a02) |
+| Ethereum | [`0x362cC8306b42475DA640C4841E90630A79B9A6eE`](https://etherscan.io/address/0x362cC8306b42475DA640C4841E90630A79B9A6eE) |
 
-```
-V2 Factory:   0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6
-V3 Factory:   0x33128a8fC17869897dcE68Ed026d694621f6FDfD
-PoolManager:  0x498581fF718922c3f8e6A244956aF099B2652b2b
-WETH:         0x4200000000000000000000000000000000000006
-```
+### Registering V4 Pools
+
+Non-default V4 pools can be registered to the leaderboard via `RegisterV4Pool`:
 
 ```bash
-forge script script/DeployOnchainRouter.s.sol --broadcast --rpc-url $BASE_RPC_URL
+ROUTER=0xCa7a19BD1E260DCd92B17DdAc068C2bF67539a02 \
+TOKEN_A=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 \
+TOKEN_B=0xa53887F7e7c1bf5010b8627F1C1ba94fE7a5d6E0 \
+FEE=10000 TICK_SPACING=100 \
+forge script script/RegisterV4Pool.s.sol --broadcast --rpc-url $BASE_RPC_URL
 ```
 
 ## Usage
