@@ -10,6 +10,7 @@ jobs:
   forge-tests:
     name: Forge Tests
     runs-on: ubuntu-latest
+    environment: ci
 
     steps:
       - uses: actions/checkout@v3
