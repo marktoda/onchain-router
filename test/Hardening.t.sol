@@ -186,6 +186,46 @@ contract HardeningForkTest is Test {
         router.swapExactOutput(quote, recipient, block.timestamp, false, maxAmountIn);
     }
 
+    function test_swapExactOutput_ETH_maxAmountIn_refundsAgainstDeposit() public {
+        // WETH is tokenIn: send native ETH, cap at maxAmountIn, expect refund of the difference
+        SwapParams memory params = SwapParams({amountSpecified: USDC_AMOUNT, tokenIn: WETH, tokenOut: USDC});
+        Quote memory quote = router.routeExactOutput(params);
+
+        uint256 maxAmountIn = (quote.amountIn * 101) / 100;
+        uint256 balanceBefore = address(this).balance;
+        uint256 amountIn =
+            router.swapExactOutput{value: maxAmountIn}(quote, recipient, block.timestamp, false, maxAmountIn);
+
+        assertEq(ERC20(USDC).balanceOf(recipient), USDC_AMOUNT, "Recipient should receive exact USDC");
+        assertEq(address(this).balance, balanceBefore - amountIn, "Unspent ETH must come back to the caller");
+        assertEq(ERC20(WETH).balanceOf(address(router)), 0, "No WETH may be stranded in the router");
+    }
+
+    function test_swapExactOutput_ETH_revertsOnDepositBoundMismatch() public {
+        SwapParams memory params = SwapParams({amountSpecified: USDC_AMOUNT, tokenIn: WETH, tokenOut: USDC});
+        Quote memory quote = router.routeExactOutput(params);
+
+        uint256 maxAmountIn = (quote.amountIn * 101) / 100;
+
+        // Deposit above the bound would strand WETH in the router
+        vm.expectRevert(OnchainRouter.InsufficientETH.selector);
+        router.swapExactOutput{value: maxAmountIn + 1}(quote, recipient, block.timestamp, false, maxAmountIn);
+
+        // Deposit below the bound would refund WETH the caller never sent
+        vm.expectRevert(OnchainRouter.InsufficientETH.selector);
+        router.swapExactOutput{value: maxAmountIn - 1}(quote, recipient, block.timestamp, false, maxAmountIn);
+    }
+
+    function test_swapExactInput_ETH_revertsOnDepositMismatch() public {
+        SwapParams memory params = SwapParams({amountSpecified: ETH_AMOUNT, tokenIn: WETH, tokenOut: USDC});
+        Quote memory quote = router.routeExactInput(params);
+
+        vm.expectRevert(OnchainRouter.InsufficientETH.selector);
+        router.swapExactInput{value: ETH_AMOUNT - 1}(quote, recipient, block.timestamp, false);
+    }
+
+    receive() external payable {}
+
     // ======== F3: reentrancy guard ========
 
     function test_swapExactInput_reentrancyBlocked() public {

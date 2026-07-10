@@ -22,14 +22,18 @@ Implements the pre-pilot changes from the OnchainRouter Hardening TDD (section 5
 - `_pullInput` measures the router's balance delta around `transferFrom` and reverts `FeeOnTransferNotSupported` on any shortfall. Applied on both entrypoints.
 - Balance-check approach (no detector contract, no new immutable): catches FOT input tokens with a clear error before any pool interaction. FOT tokens in intermediate/output legs still revert deep in pool code as today; full FOT routing is post-pilot per the TDD.
 
+### Native-ETH deposit/bound equality check (found in adversarial self-review)
+- Both entrypoints now revert `InsufficientETH` (previously declared but unused) unless `msg.value == quote.amountIn` on the ETH path.
+- Without this, the exact-output refund is computed against the max-input bound while only `msg.value` was deposited: sending more than the bound strands WETH in the router, and sending less makes the refund draw on WETH the caller never deposited (cross-user fund loss once any WETH is stranded). The new `maxAmountIn` overload made this latent mismatch easy to hit, so it is enforced for the legacy signatures too.
+
 ### Safety-invariant NatSpec
 - Documented the layered defense (deadline, guard, FOT check, bound enforcement, stateless-per-call invariant) on both swap paths.
 
 ## Testing
 
-- New `test/Hardening.t.sol` (12 tests, mainnet fork at the existing pinned block 19685800): bound authority for exact-in (inflated quote + loose bound succeeds; unmet bound reverts `TooLittleReceived`), exact-out tolerance + refund of unspent input, bound-exceeded revert, legacy 4-arg zero-tolerance behavior unchanged, duplicate/invalid fee tier reverts, new tier still addable once, reentrancy attempt via ETH-receive callback reverts `Reentrancy` (attacker contract), FOT mock token reverts on both entrypoints, normal-token pull unaffected.
+- New `test/Hardening.t.sol` (15 tests, mainnet fork at the existing pinned block 19685800): native-ETH exact-out with `maxAmountIn` (refund correctness, no stranded WETH, deposit/bound mismatch reverts both ways, exact-in mismatch revert); bound authority for exact-in (inflated quote + loose bound succeeds; unmet bound reverts `TooLittleReceived`), exact-out tolerance + refund of unspent input, bound-exceeded revert, legacy 4-arg zero-tolerance behavior unchanged, duplicate/invalid fee tier reverts, new tier still addable once, reentrancy attempt via ETH-receive callback reverts `Reentrancy` (attacker contract), FOT mock token reverts on both entrypoints, normal-token pull unaffected.
 - Updated `test/OnchainRouter.t.sol` fee-tier test for the custom error.
-- Full suite green: 50 tests passing (RouterForkTest, SwapExecutionForkTest, HardeningForkTest on mainnet fork; V4BaseForkTest + V4LeaderboardTest on Base fork).
+- Full suite green: 51 tests passing (RouterForkTest, SwapExecutionForkTest, HardeningForkTest on mainnet fork; V4BaseForkTest + V4LeaderboardTest on Base fork).
 - Local verification used public RPCs (eth.drpc.org, mainnet.base.org) since CI secrets are unavailable locally; CI will rerun with its own endpoints.
 
 ## Gas (TDD N2: under 5% regression)

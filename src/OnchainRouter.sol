@@ -107,6 +107,9 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter,
         address userTokenIn = _resolveUserToken(quote.path[0].tokenIn);
 
         if (msg.value > 0) {
+            // The swap consumes quote.amountIn; a mismatched deposit would strand or
+            // borrow WETH held by the router.
+            if (msg.value != quote.amountIn) revert InsufficientETH();
             IWETH9(intermediateToken).deposit{value: msg.value}();
         } else {
             _pullInput(userTokenIn, quote.amountIn);
@@ -176,6 +179,10 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter,
         address userTokenIn = _resolveUserToken(quote.path[0].tokenIn);
 
         if (msg.value > 0) {
+            // The refund below is computed against quote.amountIn (the max-input bound),
+            // so the deposit must match it exactly: depositing more strands WETH in the
+            // router, depositing less makes the refund draw on WETH the caller never sent.
+            if (msg.value != quote.amountIn) revert InsufficientETH();
             IWETH9(intermediateToken).deposit{value: msg.value}();
         } else {
             _pullInput(userTokenIn, quote.amountIn);
