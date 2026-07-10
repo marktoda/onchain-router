@@ -20,7 +20,7 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter,
     using QuoteLibrary for Pool;
 
     error DeadlineExpired();
-    error InsufficientETH();
+    error ETHValueMismatch(uint256 expected, uint256 actual);
     error Reentrancy();
     error FeeOnTransferNotSupported();
 
@@ -109,7 +109,7 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter,
         if (msg.value > 0) {
             // The swap consumes quote.amountIn; a mismatched deposit would strand or
             // borrow WETH held by the router.
-            if (msg.value != quote.amountIn) revert InsufficientETH();
+            if (msg.value != quote.amountIn) revert ETHValueMismatch(quote.amountIn, msg.value);
             IWETH9(intermediateToken).deposit{value: msg.value}();
         } else {
             _pullInput(userTokenIn, quote.amountIn);
@@ -178,18 +178,23 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter,
 
         address userTokenIn = _resolveUserToken(quote.path[0].tokenIn);
 
+        // The executor's return value for a multihop path is the LAST hop's input, which
+        // is denominated in the intermediate token, not userTokenIn. Realized input must
+        // therefore be derived from the router's own balance of the user's input token.
+        uint256 balanceBefore = ERC20(userTokenIn).balanceOf(address(this));
+
         if (msg.value > 0) {
             // The refund below is computed against quote.amountIn (the max-input bound),
             // so the deposit must match it exactly: depositing more strands WETH in the
             // router, depositing less makes the refund draw on WETH the caller never sent.
-            if (msg.value != quote.amountIn) revert InsufficientETH();
+            if (msg.value != quote.amountIn) revert ETHValueMismatch(quote.amountIn, msg.value);
             IWETH9(intermediateToken).deposit{value: msg.value}();
         } else {
             _pullInput(userTokenIn, quote.amountIn);
         }
 
         address swapRecipient = unwrapOutput ? address(this) : recipient;
-        amountIn = _swapExactOutput(quote, swapRecipient);
+        _swapExactOutput(quote, swapRecipient);
 
         _updateV4Scores(quote);
 
@@ -199,7 +204,10 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter,
             SafeTransferLib.safeTransferETH(recipient, outputAmount);
         }
 
-        uint256 excess = quote.amountIn - amountIn;
+        // Leftover userTokenIn above the pre-funding balance is exactly the unspent input,
+        // in the right units regardless of path shape.
+        uint256 excess = ERC20(userTokenIn).balanceOf(address(this)) - balanceBefore;
+        amountIn = quote.amountIn - excess;
         if (excess > 0) {
             if (msg.value > 0) {
                 IWETH9(intermediateToken).withdraw(excess);

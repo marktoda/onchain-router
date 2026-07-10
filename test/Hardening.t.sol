@@ -8,6 +8,7 @@ import {OnchainRouter} from "../src/OnchainRouter.sol";
 import {PathGenerator} from "../src/base/PathGenerator.sol";
 import {SwapExecutor} from "../src/base/SwapExecutor.sol";
 import {SwapParams, Quote, Pool, V2} from "../src/base/OnchainRouterStructs.sol";
+import {OnchainRouterExposed} from "./utils/OnchainRouterExposed.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {ERC20} from "solmate/src/tokens/ERC20.sol";
 
@@ -54,12 +55,13 @@ contract ReentrantRecipient {
 }
 
 contract HardeningForkTest is Test {
-    OnchainRouter router;
+    OnchainRouterExposed router;
     IUniswapV3Factory v3Factory;
     IUniswapV2Factory v2Factory;
 
     address constant WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
     address constant USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
+    address constant WBTC = 0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599;
     uint256 constant USDC_BALANCE_SLOT = 9;
     uint256 constant USDC_AMOUNT = 1000 * 1e6;
     uint256 constant ETH_AMOUNT = 1 ether;
@@ -73,7 +75,7 @@ contract HardeningForkTest is Test {
         v3Factory = IUniswapV3Factory(0x1F98431c8aD98523631AE4a59f267346ea31F984);
         v2Factory = IUniswapV2Factory(0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f);
 
-        router = new OnchainRouter(address(v2Factory), address(v3Factory), address(0), WETH);
+        router = new OnchainRouterExposed(address(v2Factory), address(v3Factory), address(0), WETH);
         recipient = makeAddr("recipient");
     }
 
@@ -177,13 +179,38 @@ contract HardeningForkTest is Test {
         SwapParams memory params = SwapParams({amountSpecified: ETH_AMOUNT, tokenIn: USDC, tokenOut: WETH});
         Quote memory quote = router.routeExactOutput(params);
 
-        // Bound below what the swap needs: the per-hop cap must trip.
+        // Bound below what the swap needs: the per-hop cap must trip. Fund and approve
+        // generously so only the cap (not the fixture) can cause the revert.
         uint256 maxAmountIn = (quote.amountIn * 95) / 100;
+        _dealUSDC(address(this), quote.amountIn * 2);
+        ERC20(USDC).approve(address(router), quote.amountIn * 2);
+
+        vm.expectRevert(SwapExecutor.V3TooMuchRequested.selector);
+        router.swapExactOutput(quote, recipient, block.timestamp, false, maxAmountIn);
+    }
+
+    function test_swapExactOutput_maxAmountIn_multihop_refundsInInputUnits() public {
+        // Force a 2-hop USDC -> WETH -> WBTC exact-output route: the executor's return
+        // value is the last hop's (WETH-denominated) input, so refund accounting must
+        // come from the router's own USDC balance delta.
+        SwapParams memory params = SwapParams({amountSpecified: 0.01e8, tokenIn: USDC, tokenOut: WBTC});
+        Quote memory quote = router.externalRouteExactOutputMulti(params, WETH);
+        assertEq(quote.path.length, 2, "Route must be 2-hop for this test");
+
+        uint256 maxAmountIn = (quote.amountIn * 101) / 100;
         _dealUSDC(address(this), maxAmountIn);
         ERC20(USDC).approve(address(router), maxAmountIn);
 
-        vm.expectRevert();
-        router.swapExactOutput(quote, recipient, block.timestamp, false, maxAmountIn);
+        uint256 balanceBefore = ERC20(USDC).balanceOf(address(this));
+        uint256 amountIn = router.swapExactOutput(quote, recipient, block.timestamp, false, maxAmountIn);
+
+        assertEq(ERC20(WBTC).balanceOf(recipient), 0.01e8, "Recipient should receive exact WBTC");
+        // amountIn must be in USDC units (close to the quote), not WETH units
+        assertApproxEqRel(amountIn, quote.amountIn, 0.05e18, "Realized input must be denominated in tokenIn");
+        assertEq(
+            ERC20(USDC).balanceOf(address(this)), balanceBefore - amountIn, "Refund must equal the unspent USDC exactly"
+        );
+        assertEq(ERC20(USDC).balanceOf(address(router)), 0, "No USDC may be stranded in the router");
     }
 
     function test_swapExactOutput_ETH_maxAmountIn_refundsAgainstDeposit() public {
@@ -208,11 +235,11 @@ contract HardeningForkTest is Test {
         uint256 maxAmountIn = (quote.amountIn * 101) / 100;
 
         // Deposit above the bound would strand WETH in the router
-        vm.expectRevert(OnchainRouter.InsufficientETH.selector);
+        vm.expectRevert(abi.encodeWithSelector(OnchainRouter.ETHValueMismatch.selector, maxAmountIn, maxAmountIn + 1));
         router.swapExactOutput{value: maxAmountIn + 1}(quote, recipient, block.timestamp, false, maxAmountIn);
 
         // Deposit below the bound would refund WETH the caller never sent
-        vm.expectRevert(OnchainRouter.InsufficientETH.selector);
+        vm.expectRevert(abi.encodeWithSelector(OnchainRouter.ETHValueMismatch.selector, maxAmountIn, maxAmountIn - 1));
         router.swapExactOutput{value: maxAmountIn - 1}(quote, recipient, block.timestamp, false, maxAmountIn);
     }
 
@@ -220,8 +247,13 @@ contract HardeningForkTest is Test {
         SwapParams memory params = SwapParams({amountSpecified: ETH_AMOUNT, tokenIn: WETH, tokenOut: USDC});
         Quote memory quote = router.routeExactInput(params);
 
-        vm.expectRevert(OnchainRouter.InsufficientETH.selector);
+        // Under-payment would make the swap draw on WETH the caller never sent
+        vm.expectRevert(abi.encodeWithSelector(OnchainRouter.ETHValueMismatch.selector, ETH_AMOUNT, ETH_AMOUNT - 1));
         router.swapExactInput{value: ETH_AMOUNT - 1}(quote, recipient, block.timestamp, false);
+
+        // Over-payment would strand WETH in the router
+        vm.expectRevert(abi.encodeWithSelector(OnchainRouter.ETHValueMismatch.selector, ETH_AMOUNT, ETH_AMOUNT + 1));
+        router.swapExactInput{value: ETH_AMOUNT + 1}(quote, recipient, block.timestamp, false);
     }
 
     receive() external payable {}
