@@ -7,6 +7,7 @@ import {SwapExecutor} from "../src/base/SwapExecutor.sol";
 import {SwapParams, Pool, Quote, V2, V3, V4} from "../src/base/OnchainRouterStructs.sol";
 import {OnchainRouterExposed} from "./utils/OnchainRouterExposed.sol";
 import {ERC20} from "solmate/src/tokens/ERC20.sol";
+import {hasV4Hop} from "./utils/ForkFixtures.sol";
 import {IWETH9} from "../src/interfaces/IWETH9.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
@@ -210,19 +211,12 @@ contract V4BaseForkTest is Test {
 
     // ======== V4 caller-supplied bounds (hardening) ========
 
-    function _hasV4Hop(Quote memory quote) internal pure returns (bool) {
-        for (uint256 i = 0; i < quote.path.length; i++) {
-            if (quote.path[i].version == V4) return true;
-        }
-        return false;
-    }
-
     function test_v4SwapExactInput_minAmountOut_bounds() public {
         vm.skip(!v4WethUsdcExists && !v4NativeEthUsdcExists);
 
         SwapParams memory params = SwapParams({amountSpecified: ETH_AMOUNT, tokenIn: WETH, tokenOut: USDC});
         Quote memory quote = router.routeExactInput(params);
-        vm.skip(!_hasV4Hop(quote));
+        vm.skip(!hasV4Hop(quote));
 
         // Unmet bound must revert inside the V4 unlock path
         vm.expectRevert(SwapExecutor.TooLittleReceived.selector);
@@ -242,7 +236,7 @@ contract V4BaseForkTest is Test {
 
         SwapParams memory params = SwapParams({amountSpecified: USDC_AMOUNT, tokenIn: WETH, tokenOut: USDC});
         Quote memory quote = router.routeExactOutput(params);
-        vm.skip(!_hasV4Hop(quote));
+        vm.skip(!hasV4Hop(quote));
 
         uint256 maxAmountIn = (quote.amountIn * 101) / 100;
         uint256 balanceBefore = address(this).balance;

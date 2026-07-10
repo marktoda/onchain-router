@@ -18,7 +18,6 @@ abstract contract PathGenerator is V4PoolRegistry {
     uint24[] public feeTiers;
 
     error InvalidFeeTier();
-    error DuplicateFeeTier();
 
     constructor(address v3Factory) {
         for (uint256 i = 0; i < defaultFeeTiers.length; i++) {
@@ -31,13 +30,14 @@ abstract contract PathGenerator is V4PoolRegistry {
 
     /// @notice Register a V3 fee tier so it is included in path generation.
     /// @dev Permissionless by design: only tiers enabled on the V3 factory (a governance
-    /// action) are accepted, and duplicates are rejected, so the feeTiers array is bounded
-    /// by the set of factory-enabled tiers and each call is idempotent.
+    /// action) are accepted, and a duplicate is a silent no-op, so the feeTiers array is
+    /// bounded by the set of factory-enabled tiers and each call is idempotent (safe for
+    /// re-runnable registration scripts).
     function addNewFeeTier(uint24 feeTier) public {
         if (v3Factory.feeAmountTickSpacing(feeTier) == 0) revert InvalidFeeTier();
         uint256 length = feeTiers.length;
         for (uint256 i = 0; i < length; i++) {
-            if (feeTiers[i] == feeTier) revert DuplicateFeeTier();
+            if (feeTiers[i] == feeTier) return;
         }
         feeTiers.push(feeTier);
     }

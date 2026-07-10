@@ -1,14 +1,12 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.0;
 
-import {Test} from "forge-std/Test.sol";
-import {IUniswapV3Factory} from "v3-core/contracts/interfaces/IUniswapV3Factory.sol";
-import {IUniswapV2Factory} from "v2-core/contracts/interfaces/IUniswapV2Factory.sol";
 import {OnchainRouter} from "../src/OnchainRouter.sol";
 import {PathGenerator} from "../src/base/PathGenerator.sol";
 import {SwapExecutor} from "../src/base/SwapExecutor.sol";
 import {SwapParams, Quote, Pool, V2} from "../src/base/OnchainRouterStructs.sol";
 import {OnchainRouterExposed} from "./utils/OnchainRouterExposed.sol";
+import {MainnetForkFixture} from "./utils/ForkFixtures.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {ERC20} from "solmate/src/tokens/ERC20.sol";
 
@@ -54,40 +52,28 @@ contract ReentrantRecipient {
     }
 }
 
-contract HardeningForkTest is Test {
+contract HardeningForkTest is MainnetForkFixture {
     OnchainRouterExposed router;
-    IUniswapV3Factory v3Factory;
-    IUniswapV2Factory v2Factory;
 
-    address constant WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
-    address constant USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
-    address constant WBTC = 0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599;
-    uint256 constant USDC_BALANCE_SLOT = 9;
     uint256 constant USDC_AMOUNT = 1000 * 1e6;
     uint256 constant ETH_AMOUNT = 1 ether;
 
     address recipient;
 
     function setUp() public {
-        string memory rpc = vm.envString("MAINNET_RPC_URL");
-        vm.createSelectFork(rpc, 19685800);
-
-        v3Factory = IUniswapV3Factory(0x1F98431c8aD98523631AE4a59f267346ea31F984);
-        v2Factory = IUniswapV2Factory(0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f);
-
-        router = new OnchainRouterExposed(address(v2Factory), address(v3Factory), address(0), WETH);
+        _forkMainnet();
+        router = new OnchainRouterExposed(V2_FACTORY, V3_FACTORY, address(0), WETH);
         recipient = makeAddr("recipient");
-    }
-
-    function _dealUSDC(address to, uint256 amount) internal {
-        vm.store(USDC, keccak256(abi.encode(to, USDC_BALANCE_SLOT)), bytes32(amount));
     }
 
     // ======== F2: addNewFeeTier hardening ========
 
-    function test_addNewFeeTier_revertsOnDuplicate() public {
-        vm.expectRevert(PathGenerator.DuplicateFeeTier.selector);
+    function test_addNewFeeTier_duplicateIsNoOp() public {
+        uint256 lengthBefore = 4; // constructor seeds the four default tiers
         router.addNewFeeTier(500);
+        assertEq(uint256(router.feeTiers(3)), 10000, "List must be unchanged");
+        vm.expectRevert();
+        router.feeTiers(lengthBefore); // still exactly 4 entries
     }
 
     function test_addNewFeeTier_revertsOnInvalidTier() public {
@@ -103,8 +89,10 @@ contract HardeningForkTest is Test {
         router.addNewFeeTier(newFeeTier);
         assertEq(uint256(router.feeTiers(4)), uint256(newFeeTier));
 
-        vm.expectRevert(PathGenerator.DuplicateFeeTier.selector);
+        // Re-registering is an idempotent no-op, safe for re-runnable scripts
         router.addNewFeeTier(newFeeTier);
+        vm.expectRevert();
+        router.feeTiers(5);
     }
 
     // ======== F1: exact-input minAmountOut bound ========
@@ -243,6 +231,8 @@ contract HardeningForkTest is Test {
         assertEq(ERC20(USDC).balanceOf(address(router)), 0, "No USDC may be stranded in the router");
     }
 
+    // ======== Native-ETH deposit/bound equality ========
+
     function test_swapExactOutput_ETH_maxAmountIn_refundsAgainstDeposit() public {
         // WETH is tokenIn: send native ETH, cap at maxAmountIn, expect refund of the difference
         SwapParams memory params = SwapParams({amountSpecified: USDC_AMOUNT, tokenIn: WETH, tokenOut: USDC});
@@ -286,8 +276,6 @@ contract HardeningForkTest is Test {
         router.swapExactInput{value: ETH_AMOUNT + 1}(quote, recipient, block.timestamp, false);
     }
 
-    receive() external payable {}
-
     // ======== F3: reentrancy guard ========
 
     function test_swapExactInput_reentrancyBlocked() public {
@@ -310,7 +298,7 @@ contract HardeningForkTest is Test {
         );
     }
 
-    // ======== F4: fee-on-transfer detection ========
+    // ======== F4: fee-on-transfer / short-delivery detection ========
 
     function _fotQuote(address token) internal pure returns (Quote memory quote) {
         Pool[] memory path = new Pool[](1);
@@ -324,7 +312,9 @@ contract HardeningForkTest is Test {
         fot.mint(address(this), 10e18);
         fot.approve(address(router), type(uint256).max);
 
-        vm.expectRevert(OnchainRouter.FeeOnTransferNotSupported.selector);
+        uint256 expected = 1e18;
+        uint256 received = expected - (expected * fot.FEE_BPS()) / 10_000;
+        vm.expectRevert(abi.encodeWithSelector(OnchainRouter.InputAmountMismatch.selector, expected, received));
         router.swapExactInput(_fotQuote(address(fot)), recipient, block.timestamp, false);
     }
 
@@ -333,7 +323,9 @@ contract HardeningForkTest is Test {
         fot.mint(address(this), 10e18);
         fot.approve(address(router), type(uint256).max);
 
-        vm.expectRevert(OnchainRouter.FeeOnTransferNotSupported.selector);
+        uint256 expected = 1e18;
+        uint256 received = expected - (expected * fot.FEE_BPS()) / 10_000;
+        vm.expectRevert(abi.encodeWithSelector(OnchainRouter.InputAmountMismatch.selector, expected, received));
         router.swapExactOutput(_fotQuote(address(fot)), recipient, block.timestamp, false);
     }
 
@@ -345,6 +337,8 @@ contract HardeningForkTest is Test {
         ERC20(USDC).approve(address(router), quote.amountIn);
 
         uint256 amountOut = router.swapExactInput(quote, recipient, block.timestamp, false);
-        assertGt(amountOut, 0, "Normal token swap must be unaffected by the FOT check");
+        assertGt(amountOut, 0, "Normal token swap must be unaffected by the input check");
     }
+
+    receive() external payable {}
 }

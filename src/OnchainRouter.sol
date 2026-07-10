@@ -22,7 +22,7 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter,
     error DeadlineExpired();
     error ETHValueMismatch(uint256 expected, uint256 actual);
     error Reentrancy();
-    error FeeOnTransferNotSupported();
+    error InputAmountMismatch(uint256 expected, uint256 received);
 
     /// @dev Reentrancy lock for the swap entrypoints. Transient so it costs no storage
     /// and always resets at the end of the transaction.
@@ -31,6 +31,9 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter,
     /// @dev Guards the external swap entrypoints only. Internal callback re-entry from
     /// poolManager (unlockCallback) and V3 pools (uniswapV3SwapCallback) happens while
     /// the lock is held and must stay unguarded.
+    /// Deliberate consequence: a contract recipient cannot start another router swap from
+    /// its receive() while an unwrapped-ETH swap is mid-flight (that call shape is
+    /// indistinguishable from a reentrancy attack). Complete the swap first, then act.
     modifier nonReentrant() {
         if (locked) revert Reentrancy();
         locked = true;
@@ -50,10 +53,10 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter,
     // ─────────────────────────────────────────────────────────────
 
     /// @notice Execute an exact-input swap using a previously obtained quote.
-    /// @dev Send ETH as msg.value for native ETH input (wraps to WETH automatically).
-    /// Set unwrapOutput=true to receive ETH instead of WETH.
-    /// The quote's amountOut acts as the minimum-output bound (zero slippage tolerance);
-    /// use the minAmountOut overload to allow tolerance.
+    /// @dev Send ETH as msg.value for native ETH input (wraps to WETH automatically);
+    /// msg.value must equal quote.amountIn exactly. Set unwrapOutput=true to receive ETH
+    /// instead of WETH. The quote's amountOut acts as the minimum-output bound (zero
+    /// slippage tolerance); use the minAmountOut overload to allow tolerance.
     /// @param quote Quote from routeExactInput containing path and amounts
     /// @param recipient Address that receives output tokens
     /// @param deadline Unix timestamp after which the swap reverts
@@ -110,14 +113,7 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter,
         // user-facing token is intermediateToken (WETH). Resolve that here.
         address userTokenIn = _resolveUserToken(quote.path[0].tokenIn);
 
-        if (msg.value > 0) {
-            // The swap consumes quote.amountIn; a mismatched deposit would strand or
-            // borrow WETH held by the router.
-            if (msg.value != quote.amountIn) revert ETHValueMismatch(quote.amountIn, msg.value);
-            IWETH9(intermediateToken).deposit{value: msg.value}();
-        } else {
-            _pullInput(userTokenIn, quote.amountIn);
-        }
+        _fundInput(userTokenIn, quote.amountIn);
 
         address swapRecipient = unwrapOutput ? address(this) : recipient;
         amountOut = _swapExactInput(quote, swapRecipient);
@@ -149,10 +145,11 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter,
 
     /// @notice Execute an exact-output swap with an explicit maximum-input bound.
     /// @dev maxAmountIn replaces quote.amountIn as both the amount pulled from the caller
-    /// (or expected as msg.value) and the input cap enforced per-hop, so the swap tolerates
-    /// adverse price drift up to maxAmountIn. Unspent input is refunded. The bound is
-    /// enforced against realized input, never a re-fetched quote. A zero maxAmountIn would
-    /// fund nothing and always revert, so it falls back to the quote's zero-tolerance behavior.
+    /// and the input cap enforced per-hop, so the swap tolerates adverse price drift up to
+    /// maxAmountIn. For native ETH input, msg.value must equal maxAmountIn exactly, the
+    /// bound, not the quoted amount. Unspent input is refunded. The bound is enforced
+    /// against realized input, never a re-fetched quote. A zero maxAmountIn would fund
+    /// nothing and always revert, so it falls back to the quote's zero-tolerance behavior.
     /// @param maxAmountIn Maximum acceptable input; the swap reverts with *TooMuchRequested
     /// above it. Pass 0 to default to quote.amountIn (zero tolerance)
     function swapExactOutput(
@@ -186,22 +183,12 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter,
 
         address userTokenIn = _resolveUserToken(quote.path[0].tokenIn);
 
-        // The executor's return value for a multihop path is the LAST hop's input, which
-        // is denominated in the intermediate token, not userTokenIn. Realized input must
-        // therefore be derived from the router's own balance of the user's input token.
-        uint256 balanceBefore = ERC20(userTokenIn).balanceOf(address(this));
-
-        if (msg.value > 0) {
-            // The refund below is computed against quote.amountIn (the max-input bound),
-            // so the deposit must match it exactly: depositing more strands WETH in the
-            // router, depositing less makes the refund draw on WETH the caller never sent.
-            if (msg.value != quote.amountIn) revert ETHValueMismatch(quote.amountIn, msg.value);
-            IWETH9(intermediateToken).deposit{value: msg.value}();
-        } else {
-            _pullInput(userTokenIn, quote.amountIn);
-        }
+        uint256 balanceBefore = _fundInput(userTokenIn, quote.amountIn);
 
         address swapRecipient = unwrapOutput ? address(this) : recipient;
+        // Return value deliberately ignored: for multihop paths the executor returns the
+        // LAST hop's input, denominated in the intermediate token, not userTokenIn.
+        // Realized input is derived from the balance delta below instead.
         _swapExactOutput(quote, swapRecipient);
 
         _updateV4Scores(quote);
@@ -212,9 +199,12 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter,
             SafeTransferLib.safeTransferETH(recipient, outputAmount);
         }
 
-        // Leftover userTokenIn above the pre-funding balance is exactly the unspent input,
-        // in the right units regardless of path shape.
+        // Leftover userTokenIn above the pre-funding balance is the unspent input, in the
+        // right units regardless of path shape. Clamped to the funded amount so a mid-swap
+        // credit of userTokenIn to the router (e.g. by a V4 hook or token callback) cannot
+        // underflow amountIn; such a credit stays in the router rather than being refunded.
         uint256 excess = ERC20(userTokenIn).balanceOf(address(this)) - balanceBefore;
+        if (excess > quote.amountIn) excess = quote.amountIn;
         amountIn = quote.amountIn - excess;
         if (excess > 0) {
             if (msg.value > 0) {
@@ -231,14 +221,27 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter,
         return token == address(0) ? intermediateToken : token;
     }
 
-    /// @notice Pull input tokens from the caller, rejecting fee-on-transfer tokens.
-    /// @dev Routing math assumes transfer amounts arrive in full; a token that takes a fee
-    /// on transfer would otherwise fail deep in pool code with an opaque error (or worse,
-    /// under a loose slippage bound, settle with silently wrong accounting).
-    function _pullInput(address token, uint256 amount) private {
-        uint256 balanceBefore = ERC20(token).balanceOf(address(this));
-        SafeTransferLib.safeTransferFrom(ERC20(token), msg.sender, address(this), amount);
-        if (ERC20(token).balanceOf(address(this)) - balanceBefore != amount) revert FeeOnTransferNotSupported();
+    /// @notice Fund the swap with the caller's input: wrap msg.value for native ETH, or
+    /// pull tokens via transferFrom, rejecting tokens that do not deliver the exact amount.
+    /// @dev Routing and refund math assume transfer amounts arrive in full. Tokens that
+    /// deliver less, fee-on-transfer tokens and share-rounding rebasing tokens like stETH,
+    /// would otherwise fail deep in pool code with an opaque error (or, under a loose
+    /// slippage bound, settle with silently wrong accounting), so they are rejected here
+    /// with a clear one. For native ETH, msg.value must equal `amount` exactly (which is
+    /// the caller's bound, maxAmountIn, on the exact-output overload): the refund is
+    /// computed against `amount`, so depositing more strands WETH in the router and
+    /// depositing less makes the refund draw on WETH the caller never sent.
+    /// @return balanceBefore The router's `token` balance before funding, for refund accounting
+    function _fundInput(address token, uint256 amount) private returns (uint256 balanceBefore) {
+        balanceBefore = ERC20(token).balanceOf(address(this));
+        if (msg.value > 0) {
+            if (msg.value != amount) revert ETHValueMismatch(amount, msg.value);
+            IWETH9(intermediateToken).deposit{value: msg.value}();
+        } else {
+            SafeTransferLib.safeTransferFrom(ERC20(token), msg.sender, address(this), amount);
+            uint256 received = ERC20(token).balanceOf(address(this)) - balanceBefore;
+            if (received != amount) revert InputAmountMismatch(amount, received);
+        }
     }
 
     function _updateV4Scores(Quote memory quote) private {

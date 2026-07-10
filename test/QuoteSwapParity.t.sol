@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.0;
 
-import {Test} from "forge-std/Test.sol";
-import {OnchainRouter} from "../src/OnchainRouter.sol";
-import {SwapParams, Quote, V4} from "../src/base/OnchainRouterStructs.sol";
+import {SwapParams, Quote} from "../src/base/OnchainRouterStructs.sol";
 import {OnchainRouterExposed} from "./utils/OnchainRouterExposed.sol";
+import {MainnetForkFixture, BaseForkFixture, hasV4Hop} from "./utils/ForkFixtures.sol";
 import {ERC20} from "solmate/src/tokens/ERC20.sol";
 
 /// @notice Quoter/executor parity property tests (TDD 5.3 launch blocker).
@@ -12,27 +11,15 @@ import {ERC20} from "solmate/src/tokens/ERC20.sol";
 /// the real pools. These tests assert the two agree bit-for-bit: quote and swap run in
 /// the same forked state, so any difference is a rounding divergence in the quoter, the
 /// exact class of bug that reverts every boundary swap in production.
-contract QuoteSwapParityMainnetTest is Test {
+contract QuoteSwapParityMainnetTest is MainnetForkFixture {
     OnchainRouterExposed router;
-
-    address constant WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
-    address constant USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
-    address constant WBTC = 0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599;
-    address constant V3_FACTORY = 0x1F98431c8aD98523631AE4a59f267346ea31F984;
-    address constant V2_FACTORY = 0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f;
-    uint256 constant USDC_BALANCE_SLOT = 9;
 
     address recipient;
 
     function setUp() public {
-        string memory rpc = vm.envString("MAINNET_RPC_URL");
-        vm.createSelectFork(rpc, 19685800);
+        _forkMainnet();
         router = new OnchainRouterExposed(V2_FACTORY, V3_FACTORY, address(0), WETH);
         recipient = makeAddr("recipient");
-    }
-
-    function _dealUSDC(address to, uint256 amount) internal {
-        vm.store(USDC, keccak256(abi.encode(to, USDC_BALANCE_SLOT)), bytes32(amount));
     }
 
     // ======== Exact-input parity: realized output must equal quoted output exactly ========
@@ -126,31 +113,16 @@ contract QuoteSwapParityMainnetTest is Test {
 /// diverge (the quoter is hook-unaware by design) and a nonzero protocol fee is a KNOWN
 /// quoter gap (V4QuoterMath passes only key.fee to computeSwapStep); pools where either
 /// applies are skipped here and must be addressed before the parity gate is complete.
-contract QuoteSwapParityV4BaseTest is Test {
+contract QuoteSwapParityV4BaseTest is BaseForkFixture {
     OnchainRouterExposed router;
-
-    address constant V2_FACTORY = 0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6;
-    address constant V3_FACTORY = 0x33128a8fC17869897dcE68Ed026d694621f6FDfD;
-    address constant POOL_MANAGER = 0x498581fF718922c3f8e6A244956aF099B2652b2b;
-    address constant WETH = 0x4200000000000000000000000000000000000006;
-    address constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
-    uint256 constant USDC_BALANCE_SLOT = 9;
 
     address recipient;
 
     function setUp() public {
-        string memory rpc = vm.envString("BASE_RPC_URL");
         // Pinned for reproducible fuzz counterexamples
-        vm.createSelectFork(rpc, 32_000_000);
+        _forkBase(32_000_000);
         router = new OnchainRouterExposed(V2_FACTORY, V3_FACTORY, POOL_MANAGER, WETH);
         recipient = makeAddr("recipient");
-    }
-
-    function _hasV4Hop(Quote memory quote) internal pure returns (bool) {
-        for (uint256 i = 0; i < quote.path.length; i++) {
-            if (quote.path[i].version == V4) return true;
-        }
-        return false;
     }
 
     /// forge-config: default.fuzz.runs = 32
@@ -160,7 +132,7 @@ contract QuoteSwapParityV4BaseTest is Test {
         SwapParams memory params = SwapParams({amountSpecified: amountIn, tokenIn: WETH, tokenOut: USDC});
         Quote memory quote = router.routeExactInput(params);
         vm.assume(quote.amountOut > 0);
-        vm.assume(_hasV4Hop(quote)); // only meaningful when a V4 pool wins the route
+        vm.assume(hasV4Hop(quote)); // only meaningful when a V4 pool wins the route
 
         vm.deal(address(this), amountIn);
         uint256 amountOut = router.swapExactInput{value: amountIn}(quote, recipient, block.timestamp, false);
@@ -174,7 +146,7 @@ contract QuoteSwapParityV4BaseTest is Test {
         SwapParams memory params = SwapParams({amountSpecified: amountOut, tokenIn: WETH, tokenOut: USDC});
         Quote memory quote = router.routeExactOutput(params);
         vm.assume(quote.amountIn > 0 && quote.amountIn < 1_000 ether);
-        vm.assume(_hasV4Hop(quote));
+        vm.assume(hasV4Hop(quote));
 
         vm.deal(address(this), quote.amountIn);
         uint256 amountIn = router.swapExactOutput{value: quote.amountIn}(quote, recipient, block.timestamp, false);

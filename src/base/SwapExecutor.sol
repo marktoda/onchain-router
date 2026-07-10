@@ -76,6 +76,11 @@ abstract contract SwapExecutor is OnchainRouterImmutables, IUnlockCallback {
     //  Exact Output
     // ─────────────────────────────────────────────────────────────
 
+    /// @dev CAUTION: for multihop paths the returned amountIn is the LAST hop's input,
+    /// denominated in that hop's input token (the intermediate), NOT the caller's input
+    /// token. Earlier hops' inputs are paid inside callbacks/recursion and are not
+    /// aggregated here. Do not use this return value for user-facing accounting; derive
+    /// realized input from a balance delta instead (see OnchainRouter).
     function _swapExactOutput(Quote memory quote, address recipient) internal returns (uint256 amountIn) {
         if (_hasV4Hop(quote)) {
             bytes memory result = poolManager.unlock(abi.encode(quote, recipient, false));
