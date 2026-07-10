@@ -72,8 +72,10 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter,
     /// @dev Same as swapExactInput but the caller-supplied minAmountOut is the authoritative
     /// slippage bound instead of quote.amountOut, allowing the swap to succeed on adverse
     /// price drift down to minAmountOut. The bound is enforced against realized output,
-    /// never a re-fetched quote.
-    /// @param minAmountOut Minimum acceptable output; the swap reverts with TooLittleReceived below it
+    /// never a re-fetched quote. A zero minAmountOut would silently disable slippage
+    /// protection, so it falls back to the quote's zero-tolerance behavior instead.
+    /// @param minAmountOut Minimum acceptable output; the swap reverts with TooLittleReceived
+    /// below it. Pass 0 to default to quote.amountOut (zero tolerance)
     function swapExactInput(
         Quote memory quote,
         address recipient,
@@ -81,7 +83,9 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter,
         bool unwrapOutput,
         uint256 minAmountOut
     ) external payable nonReentrant returns (uint256 amountOut) {
-        return _swapExactInputWithBound(quote, recipient, deadline, unwrapOutput, minAmountOut);
+        return _swapExactInputWithBound(
+            quote, recipient, deadline, unwrapOutput, minAmountOut == 0 ? quote.amountOut : minAmountOut
+        );
     }
 
     /// @dev Layered safety on this path: (1) deadline check; (2) nonReentrant entrypoints —
@@ -147,8 +151,10 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter,
     /// @dev maxAmountIn replaces quote.amountIn as both the amount pulled from the caller
     /// (or expected as msg.value) and the input cap enforced per-hop, so the swap tolerates
     /// adverse price drift up to maxAmountIn. Unspent input is refunded. The bound is
-    /// enforced against realized input, never a re-fetched quote.
-    /// @param maxAmountIn Maximum acceptable input; the swap reverts with *TooMuchRequested above it
+    /// enforced against realized input, never a re-fetched quote. A zero maxAmountIn would
+    /// fund nothing and always revert, so it falls back to the quote's zero-tolerance behavior.
+    /// @param maxAmountIn Maximum acceptable input; the swap reverts with *TooMuchRequested
+    /// above it. Pass 0 to default to quote.amountIn (zero tolerance)
     function swapExactOutput(
         Quote memory quote,
         address recipient,
@@ -156,7 +162,9 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter,
         bool unwrapOutput,
         uint256 maxAmountIn
     ) external payable nonReentrant returns (uint256 amountIn) {
-        return _swapExactOutputWithBound(quote, recipient, deadline, unwrapOutput, maxAmountIn);
+        return _swapExactOutputWithBound(
+            quote, recipient, deadline, unwrapOutput, maxAmountIn == 0 ? quote.amountIn : maxAmountIn
+        );
     }
 
     /// @dev Layered safety on this path: (1) deadline check; (2) nonReentrant entrypoints;

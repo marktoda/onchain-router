@@ -141,6 +141,36 @@ contract HardeningForkTest is Test {
         router.swapExactInput(quote, recipient, block.timestamp, false, minAmountOut);
     }
 
+    function test_swapExactInput_zeroMinAmountOut_defaultsToQuote() public {
+        SwapParams memory params = SwapParams({amountSpecified: USDC_AMOUNT, tokenIn: USDC, tokenOut: WETH});
+        Quote memory quote = router.routeExactInput(params);
+
+        // A zero bound must NOT disable protection: it falls back to quote.amountOut,
+        // so an unreachable quote still reverts.
+        quote.amountOut = quote.amountOut + 1;
+
+        _dealUSDC(address(this), quote.amountIn);
+        ERC20(USDC).approve(address(router), quote.amountIn);
+
+        vm.expectRevert(SwapExecutor.TooLittleReceived.selector);
+        router.swapExactInput(quote, recipient, block.timestamp, false, 0);
+    }
+
+    function test_swapExactOutput_zeroMaxAmountIn_defaultsToQuote() public {
+        SwapParams memory params = SwapParams({amountSpecified: ETH_AMOUNT, tokenIn: USDC, tokenOut: WETH});
+        Quote memory quote = router.routeExactOutput(params);
+
+        _dealUSDC(address(this), quote.amountIn);
+        ERC20(USDC).approve(address(router), quote.amountIn);
+
+        // A zero bound falls back to quote.amountIn: funds the swap exactly like the
+        // legacy 4-arg signature instead of pulling nothing and reverting.
+        uint256 amountIn = router.swapExactOutput(quote, recipient, block.timestamp, false, 0);
+
+        assertEq(ERC20(WETH).balanceOf(recipient), ETH_AMOUNT, "Recipient should receive exact WETH");
+        assertLe(amountIn, quote.amountIn, "Should behave exactly like the legacy signature");
+    }
+
     function test_swapExactInput_legacySignature_zeroToleranceUnchanged() public {
         SwapParams memory params = SwapParams({amountSpecified: USDC_AMOUNT, tokenIn: USDC, tokenOut: WETH});
         Quote memory quote = router.routeExactInput(params);
