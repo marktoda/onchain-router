@@ -7,6 +7,7 @@ import {SwapExecutor} from "../src/base/SwapExecutor.sol";
 import {SwapParams, Quote, Pool, V2} from "../src/base/OnchainRouterStructs.sol";
 import {OnchainRouterExposed} from "./utils/OnchainRouterExposed.sol";
 import {MainnetForkFixture} from "./utils/ForkFixtures.sol";
+import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {ERC20} from "solmate/src/tokens/ERC20.sol";
 
@@ -341,4 +342,122 @@ contract HardeningForkTest is MainnetForkFixture {
     }
 
     receive() external payable {}
+}
+
+/// @notice ERC20 that donates extra tokens to the router whenever it is transferred to a
+/// pool, simulating a mid-swap credit (the case the exact-output excess clamp guards)
+contract MockDonatingToken is ERC20("DON", "DON", 18) {
+    address public router;
+    address public pool;
+
+    function configure(address _router, address _pool) external {
+        router = _router;
+        pool = _pool;
+    }
+
+    function mint(address to, uint256 amount) external {
+        _mint(to, amount);
+    }
+
+    function transfer(address to, uint256 amount) public override returns (bool) {
+        bool ok = super.transfer(to, amount);
+        // Mid-swap credit: paying the pool triggers a donation to the router
+        if (to == pool && router != address(0)) _mint(router, amount * 3);
+        return ok;
+    }
+}
+
+/// @notice Minimal V2-pair stand-in: reports reserves and pays out on swap
+contract MockV2Pair {
+    address public token0;
+    address public token1;
+
+    constructor(address _token0, address _token1) {
+        (token0, token1) = _token0 < _token1 ? (_token0, _token1) : (_token1, _token0);
+    }
+
+    function getReserves() external pure returns (uint112, uint112, uint32) {
+        return (uint112(1_000_000e18), uint112(1_000_000e18), 0);
+    }
+
+    function swap(uint256 amount0Out, uint256 amount1Out, address to, bytes calldata) external {
+        if (amount0Out > 0) ERC20(token0).transfer(to, amount0Out);
+        if (amount1Out > 0) ERC20(token1).transfer(to, amount1Out);
+    }
+}
+
+contract ExcessClampForkTest is MainnetForkFixture {
+    OnchainRouterExposed router;
+    address recipient;
+
+    function setUp() public {
+        _forkMainnet();
+        router = new OnchainRouterExposed(V2_FACTORY, V3_FACTORY, address(0), WETH);
+        recipient = makeAddr("recipient");
+    }
+
+    /// @notice Exercises the TRUE branch of the exact-output excess clamp: a token that
+    /// credits the router mid-swap must not underflow amountIn; the surplus stays in the
+    /// router and the refund is capped at what the caller funded.
+    function test_swapExactOutput_midSwapCredit_clampsExcess() public {
+        MockERC20 outToken = new MockERC20("OUT", "OUT", 18);
+        MockDonatingToken donating = new MockDonatingToken();
+        MockV2Pair pair = new MockV2Pair(address(donating), address(outToken));
+        donating.configure(address(router), address(pair));
+        outToken.mint(address(pair), type(uint128).max);
+
+        donating.mint(address(this), 1_000e18);
+        donating.approve(address(router), type(uint256).max);
+
+        Pool[] memory path = new Pool[](1);
+        PoolKey memory emptyKey;
+        path[0] = Pool({
+            tokenIn: address(donating),
+            tokenOut: address(outToken),
+            fee: 3000,
+            pool: address(pair),
+            version: V2,
+            key: emptyKey
+        });
+        Quote memory quote = Quote({path: path, amountIn: 100e18, amountOut: 50e18});
+
+        uint256 balanceBefore = donating.balanceOf(address(this));
+        // Without the clamp this underflows: the mid-swap donation makes the router's
+        // balance delta exceed the funded amount
+        uint256 amountIn = router.swapExactOutput(quote, recipient, block.timestamp, false);
+
+        assertEq(outToken.balanceOf(recipient), 50e18, "Exact output must be delivered");
+        assertEq(amountIn, 0, "Clamp floors realized input at zero when credits exceed spend");
+        assertEq(donating.balanceOf(address(this)), balanceBefore, "Refund is capped at the funded amount");
+        assertGt(donating.balanceOf(address(router)), 0, "The mid-swap credit stays in the router");
+    }
+}
+
+contract ReentrancyExactOutForkTest is MainnetForkFixture {
+    OnchainRouterExposed router;
+
+    function setUp() public {
+        _forkMainnet();
+        router = new OnchainRouterExposed(V2_FACTORY, V3_FACTORY, address(0), WETH);
+    }
+
+    /// @notice Symmetric coverage of the guard on the exact-output entrypoint
+    function test_swapExactOutput_reentrancyBlocked() public {
+        ReentrantRecipient attacker = new ReentrantRecipient(router);
+
+        // Reentry is triggered via the unwrapped-ETH output landing on the attacker
+        SwapParams memory ethParams = SwapParams({amountSpecified: 1 ether, tokenIn: USDC, tokenOut: WETH});
+        Quote memory ethQuote = router.routeExactOutput(ethParams);
+        _dealUSDC(address(this), ethQuote.amountIn);
+        ERC20(USDC).approve(address(router), ethQuote.amountIn);
+
+        router.swapExactOutput(ethQuote, address(attacker), block.timestamp, true);
+
+        assertFalse(attacker.reentered(), "Reentrant call must not succeed");
+        assertEq(
+            attacker.reentryRevertSelector(),
+            OnchainRouter.Reentrancy.selector,
+            "Reentrant call must revert with Reentrancy"
+        );
+    }
 }
