@@ -1,0 +1,149 @@
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity ^0.8.0;
+
+import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
+import {IUniswapV3Factory} from "v3-core/contracts/interfaces/IUniswapV3Factory.sol";
+import {IUniswapV3Pool} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
+import {SwapExecutor} from "../src/base/SwapExecutor.sol";
+import {SwapParams, Quote} from "../src/base/OnchainRouterStructs.sol";
+import {OnchainRouterExposed} from "./utils/OnchainRouterExposed.sol";
+import {MainnetForkFixture} from "./utils/ForkFixtures.sol";
+import {V3PositionMinter} from "./utils/V3PositionMinter.sol";
+import {ERC20} from "solmate/src/tokens/ERC20.sol";
+
+/// @notice F7: opt-in 3-hop routing. A deterministic chain of fresh pools
+/// (A -> X -> Y -> B, nothing else) makes the pair unroutable at 2 hops and
+/// routable only by the 3-hop search through configured intermediates X and Y.
+contract ThreeHopTest is MainnetForkFixture {
+    uint160 constant SQRT_PRICE_1_1 = 79228162514264337593543950336;
+
+    OnchainRouterExposed router;
+    V3PositionMinter minter;
+    MockERC20 tokenA;
+    MockERC20 tokenB;
+    MockERC20 tokenX; // intermediate 1
+    MockERC20 tokenY; // intermediate 2
+
+    address recipient;
+
+    function setUp() public {
+        _forkMainnet();
+        router = new OnchainRouterExposed(V2_FACTORY, V3_FACTORY, address(0), WETH, address(this));
+        minter = new V3PositionMinter();
+        recipient = makeAddr("recipient");
+
+        tokenA = new MockERC20("TokenA", "TKA", 18);
+        tokenB = new MockERC20("TokenB", "TKB", 18);
+        tokenX = new MockERC20("TokenX", "TKX", 18);
+        tokenY = new MockERC20("TokenY", "TKY", 18);
+
+        // The ONLY liquidity chain is A -> X -> Y -> B
+        _createPool(address(tokenA), address(tokenX));
+        _createPool(address(tokenX), address(tokenY));
+        _createPool(address(tokenY), address(tokenB));
+
+        router.addIntermediateToken(address(tokenX));
+        router.addIntermediateToken(address(tokenY));
+
+        tokenA.mint(address(this), type(uint128).max);
+        tokenA.approve(address(router), type(uint256).max);
+    }
+
+    function _createPool(address t0, address t1) internal {
+        address pool = IUniswapV3Factory(V3_FACTORY).createPool(t0, t1, 3000);
+        IUniswapV3Pool(pool).initialize(SQRT_PRICE_1_1);
+        MockERC20(t0).mint(address(minter), type(uint128).max);
+        MockERC20(t1).mint(address(minter), type(uint128).max);
+        minter.mint(pool, -6000, 6000, 3e22);
+    }
+
+    // ======== Routing ========
+
+    function test_threeHop_findsRouteTwoHopCannot() public {
+        SwapParams memory params =
+            SwapParams({amountSpecified: 100e18, tokenIn: address(tokenA), tokenOut: address(tokenB)});
+
+        // Standard (2-hop) routing cannot reach B
+        Quote memory twoHop = router.routeExactInput(params);
+        assertEq(twoHop.amountOut, 0, "Pair must be unroutable at 2 hops (test precondition)");
+
+        // Opt-in 3-hop search finds A -> X -> Y -> B
+        Quote memory quote = router.routeExactInput3Hop(params);
+        assertGt(quote.amountOut, 0, "3-hop search must find the chain");
+        assertEq(quote.path.length, 3, "Route must be 3 hops");
+        assertEq(quote.path[0].tokenOut, address(tokenX));
+        assertEq(quote.path[1].tokenOut, address(tokenY));
+        assertEq(quote.path[2].tokenOut, address(tokenB));
+    }
+
+    function test_threeHop_neverWorseThanTwoHop() public {
+        // Create an A -> Y pool so BOTH a 2-hop route (A -> Y -> B) and a genuine 3-hop
+        // candidate (A -> X -> Y -> B) exist for the pair; the superset search must
+        // compare them and return at least the 2-hop result
+        _createPool(address(tokenA), address(tokenY));
+
+        SwapParams memory params =
+            SwapParams({amountSpecified: 100e18, tokenIn: address(tokenA), tokenOut: address(tokenB)});
+        Quote memory twoHop = router.routeExactInput(params);
+        assertGt(twoHop.amountOut, 0, "2-hop route must exist (test precondition)");
+
+        Quote memory threeHop = router.routeExactInput3Hop(params);
+        assertGe(threeHop.amountOut, twoHop.amountOut, "Superset search must never be worse");
+        assertTrue(threeHop.path.length == 2 || threeHop.path.length == 3, "Winner must be a real route");
+    }
+
+    // ======== Execution: the executor is N-hop agnostic ========
+
+    function test_threeHop_exactIn_executesWithParity() public {
+        SwapParams memory params =
+            SwapParams({amountSpecified: 100e18, tokenIn: address(tokenA), tokenOut: address(tokenB)});
+        Quote memory quote = router.routeExactInput3Hop(params);
+        assertGt(quote.amountOut, 0);
+
+        uint256 amountOut = router.swapExactInput(quote, recipient, block.timestamp, false);
+        assertEq(amountOut, quote.amountOut, "3-hop exact-in: parity must hold bit-for-bit");
+        assertEq(ERC20(address(tokenB)).balanceOf(recipient), amountOut);
+    }
+
+    function test_threeHop_exactIn_minAmountOutEnforced() public {
+        SwapParams memory params =
+            SwapParams({amountSpecified: 100e18, tokenIn: address(tokenA), tokenOut: address(tokenB)});
+        Quote memory quote = router.routeExactInput3Hop(params);
+
+        vm.expectRevert(SwapExecutor.TooLittleReceived.selector);
+        router.swapExactInput(quote, recipient, block.timestamp, false, quote.amountOut + 1);
+    }
+
+    function test_threeHop_exactOut_executesWithExactRefund() public {
+        SwapParams memory params =
+            SwapParams({amountSpecified: 50e18, tokenIn: address(tokenA), tokenOut: address(tokenB)});
+        Quote memory quote = router.routeExactOutput3Hop(params);
+        assertGt(quote.amountIn, 0, "Exact-out 3-hop route must exist");
+        assertTrue(quote.amountIn != type(uint256).max, "Quote must be real");
+        assertEq(quote.path.length, 3, "Route must be 3 hops");
+
+        uint256 maxAmountIn = (quote.amountIn * 101) / 100;
+        uint256 balanceBefore = ERC20(address(tokenA)).balanceOf(address(this));
+        uint256 amountIn = router.swapExactOutput(quote, recipient, block.timestamp, false, maxAmountIn);
+
+        assertEq(ERC20(address(tokenB)).balanceOf(recipient), 50e18, "Exact output must be delivered");
+        assertEq(
+            ERC20(address(tokenA)).balanceOf(address(this)),
+            balanceBefore - amountIn,
+            "Refund must be exact in tokenA units across 3 hops"
+        );
+        assertEq(ERC20(address(tokenA)).balanceOf(address(router)), 0, "Nothing stranded");
+    }
+
+    function test_threeHop_exactOut_maxAmountInEnforced() public {
+        SwapParams memory params =
+            SwapParams({amountSpecified: 50e18, tokenIn: address(tokenA), tokenOut: address(tokenB)});
+        Quote memory quote = router.routeExactOutput3Hop(params);
+
+        uint256 maxAmountIn = (quote.amountIn * 95) / 100;
+        vm.expectRevert(SwapExecutor.V3TooMuchRequested.selector);
+        router.swapExactOutput(quote, recipient, block.timestamp, false, maxAmountIn);
+    }
+
+    receive() external payable {}
+}
