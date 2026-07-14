@@ -370,6 +370,74 @@ contract OnchainRouter is
         }
     }
 
+    /// @notice Find the optimal route allowing up to 3 hops. OPT-IN: strictly more
+    /// expensive than routeExactInput (it tries every ordered pair of configured
+    /// intermediates, up to MAX*(MAX-1) extra 3-hop candidates, each costing three full
+    /// single-hop sweeps), so callers choose it explicitly; the standard entrypoints
+    /// stay 2-hop. The result is a superset search: direct and 2-hop candidates are
+    /// always included, so this never returns a worse route than routeExactInput.
+    function routeExactInput3Hop(SwapParams memory params) external view returns (Quote memory bestQuote) {
+        bestQuote = routeExactInput(params);
+        uint256 length = intermediateTokens.length;
+        for (uint256 i = 0; i < length; i++) {
+            address first = intermediateTokens[i];
+            if (first == params.tokenIn || first == params.tokenOut) continue;
+            Quote memory legOne = routeExactInputSingle(
+                SwapParams({tokenIn: params.tokenIn, tokenOut: first, amountSpecified: params.amountSpecified})
+            );
+            if (legOne.amountOut == 0) continue;
+
+            for (uint256 j = 0; j < length; j++) {
+                if (j == i) continue;
+                address second = intermediateTokens[j];
+                if (second == params.tokenIn || second == params.tokenOut) continue;
+
+                Quote memory legTwo = routeExactInputSingle(
+                    SwapParams({tokenIn: first, tokenOut: second, amountSpecified: legOne.amountOut})
+                );
+                if (legTwo.amountOut == 0) continue;
+                Quote memory legThree = routeExactInputSingle(
+                    SwapParams({tokenIn: second, tokenOut: params.tokenOut, amountSpecified: legTwo.amountOut})
+                );
+                if (legThree.amountOut == 0) continue;
+
+                bestQuote = legOne.combine(legTwo).combine(legThree).better(bestQuote);
+            }
+        }
+    }
+
+    /// @notice Exact-output twin of routeExactInput3Hop: legs are sized backwards from
+    /// the requested output, then combined forward. Same opt-in cost profile.
+    function routeExactOutput3Hop(SwapParams memory params) external view returns (Quote memory bestQuote) {
+        bestQuote = routeExactOutput(params);
+        uint256 length = intermediateTokens.length;
+        for (uint256 i = 0; i < length; i++) {
+            address second = intermediateTokens[i];
+            if (second == params.tokenIn || second == params.tokenOut) continue;
+            Quote memory legThree = routeExactOutputSingle(
+                SwapParams({tokenIn: second, tokenOut: params.tokenOut, amountSpecified: params.amountSpecified})
+            );
+            if (legThree.amountIn == 0 || legThree.amountIn == type(uint256).max) continue;
+
+            for (uint256 j = 0; j < length; j++) {
+                if (j == i) continue;
+                address first = intermediateTokens[j];
+                if (first == params.tokenIn || first == params.tokenOut) continue;
+
+                Quote memory legTwo = routeExactOutputSingle(
+                    SwapParams({tokenIn: first, tokenOut: second, amountSpecified: legThree.amountIn})
+                );
+                if (legTwo.amountIn == 0 || legTwo.amountIn == type(uint256).max) continue;
+                Quote memory legOne = routeExactOutputSingle(
+                    SwapParams({tokenIn: params.tokenIn, tokenOut: first, amountSpecified: legTwo.amountIn})
+                );
+                if (legOne.amountIn == 0 || legOne.amountIn == type(uint256).max) continue;
+
+                bestQuote = legOne.combine(legTwo).combine(legThree).better(bestQuote);
+            }
+        }
+    }
+
     function routeExactInputMulti(SwapParams memory params, address intermediate)
         internal
         view
