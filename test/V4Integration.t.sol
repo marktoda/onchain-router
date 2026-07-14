@@ -500,6 +500,42 @@ contract V4LeaderboardTest is Test {
         );
     }
 
+    function test_challenge_concurrentFinalize_strongerChallengerCanEvictFreshListing() public {
+        _fillBoard(100e18);
+        _mockLiquidityFor(address(uint160(3000)), 5e18);
+        _mockLiquidityFor(address(uint160(5000)), 6e18);
+
+        address weaker = address(uint160(9000));
+        address stronger = address(uint160(9100));
+        _mockPool(weaker, 500e18);
+        _mockPool(stronger, 1000e18);
+        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, weaker);
+        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, stronger);
+
+        vm.warp(block.timestamp + CHALLENGE_DELAY);
+        assertTrue(router.finalizeV4Challenge(TOKEN_A, TOKEN_B, 500, 10, weaker), "First finalize evicts weakest");
+        // Documented behavior: the freshly listed challenger has no win stamp, so a
+        // stronger concurrent challenger may evict it in turn; capital-ranked outcome
+        assertTrue(router.finalizeV4Challenge(TOKEN_A, TOKEN_B, 500, 10, stronger), "Second finalize also lands");
+
+        // The stronger challenger is now listed (duplicate start reverts)
+        vm.expectRevert(V4PoolRegistry.DuplicatePool.selector);
+        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, stronger);
+    }
+
+    function test_startChallenge_blockedAtExactExpiryBoundary() public {
+        _fillBoard(100e18);
+        address challenger = address(uint160(9000));
+        _mockPool(challenger, 1000e18);
+        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger);
+
+        // Inclusive boundary: at exactly startedAt + EXPIRY the challenge still occupies
+        // its key and re-declaring must revert
+        vm.warp(block.timestamp + CHALLENGE_EXPIRY);
+        vm.expectRevert(V4PoolRegistry.ChallengePending.selector);
+        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger);
+    }
+
     function test_startChallenge_reverts_zeroLiquidityChallenger() public {
         _fillBoard(100e18);
         address challenger = address(uint160(9000));
