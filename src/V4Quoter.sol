@@ -13,6 +13,13 @@ import {SwapHop} from "./base/OnchainRouterStructs.sol";
 /// @notice Simulates V4 swaps offchain by reading pool state via StateLibrary (extsload).
 /// @dev Uses try/catch with 500K gas limit to safely handle pools with extreme tick depth.
 /// Returns 0 (exact-in) or type(uint256).max (exact-out) on failure.
+///
+/// HOOK-UNAWARE BY DESIGN: quotes simulate core pool math only. A pool whose hooks
+/// change amounts (beforeSwap deltas, LP-fee overrides, custom curves) will quote
+/// differently than it executes, and under the exact-bound design such swaps revert
+/// rather than settle at an unquoted price. Integrators routing hooked pools must
+/// supply their own bounds. Protocol fees and initialized dynamic LP fees ARE covered
+/// (read from slot0; see V4QuoterMath).
 abstract contract V4Quoter is OnchainRouterImmutables {
     using PoolIdLibrary for PoolKey;
 
