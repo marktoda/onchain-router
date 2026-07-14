@@ -4,6 +4,7 @@ pragma solidity ^0.8.0;
 import {Test, console} from "forge-std/Test.sol";
 import {OnchainRouter} from "../src/OnchainRouter.sol";
 import {SwapExecutor} from "../src/base/SwapExecutor.sol";
+import {V4PoolRegistry} from "../src/base/V4PoolRegistry.sol";
 import {SwapParams, Pool, Quote, V2, V3, V4} from "../src/base/OnchainRouterStructs.sol";
 import {OnchainRouterExposed} from "./utils/OnchainRouterExposed.sol";
 import {ERC20} from "solmate/src/tokens/ERC20.sol";
@@ -283,107 +284,198 @@ contract V4LeaderboardTest is Test {
     address constant TOKEN_B = address(0xB);
     address constant WETH = address(0xC);
 
+    uint256 constant CHALLENGE_DELAY = 1 days;
+    uint256 constant CHALLENGE_EXPIRY = 3 days;
+
     function setUp() public {
-        // Deploy a mock PoolManager with code
         vm.etch(POOL_MANAGER, hex"00");
 
-        // Mock the V3 factory feeAmountTickSpacing calls for PathGenerator constructor
         address v3Factory = address(0xF3);
         vm.etch(v3Factory, hex"00");
-        // Return 0 for all fee tiers (none enabled) — we're testing V4, not V3
         vm.mockCall(v3Factory, abi.encodeWithSignature("feeAmountTickSpacing(uint24)"), abi.encode(int24(0)));
-
-        // Mock V2 factory
         address v2Factory = address(0xF2);
         vm.etch(v2Factory, hex"00");
 
         router = new OnchainRouterExposed(v2Factory, v3Factory, POOL_MANAGER, WETH, address(this));
+        // Start at a realistic timestamp so epoch math has room
+        vm.warp(365 days * 56);
     }
 
-    function test_registerV4Pool_success() public {
-        // Mock pool existence: getSlot0 returns non-zero sqrtPriceX96
-        PoolKey memory key = _makeKey(TOKEN_A, TOKEN_B, 500, 10, address(0));
-        bytes32 poolId = PoolId.unwrap(key.toId());
-        _mockSlot0(poolId, 1 << 96); // sqrtPriceX96 = 2^96 (price = 1)
+    // ======== Direct registration (non-full board) ========
 
+    function test_registerV4Pool_success() public {
+        _mockPool(address(0), 1e18);
         router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, address(0));
     }
 
     function test_registerV4Pool_reverts_nonExistentPool() public {
-        // Mock pool non-existence: getSlot0 returns 0
         PoolKey memory key = _makeKey(TOKEN_A, TOKEN_B, 500, 10, address(0));
-        bytes32 poolId = PoolId.unwrap(key.toId());
-        _mockSlot0(poolId, 0);
-
-        vm.expectRevert(bytes("Pool does not exist"));
+        _mockSlot0(PoolId.unwrap(key.toId()), 0);
+        vm.expectRevert(V4PoolRegistry.PoolDoesNotExist.selector);
         router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, address(0));
     }
 
     function test_registerV4Pool_reverts_duplicate() public {
-        PoolKey memory key = _makeKey(TOKEN_A, TOKEN_B, 500, 10, address(0));
-        bytes32 poolId = PoolId.unwrap(key.toId());
-        _mockSlot0(poolId, 1 << 96);
-
+        _mockPool(address(0), 1e18);
         router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, address(0));
-
-        vm.expectRevert(bytes("Duplicate pool"));
+        vm.expectRevert(V4PoolRegistry.DuplicatePool.selector);
         router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, address(0));
     }
 
-    function test_registerV4Pool_fillsLeaderboard() public {
-        // Register 8 pools (MAX_V4_POOLS_PER_PAIR) with different hooks
-        for (uint256 i = 1; i <= 8; i++) {
-            address hooks = address(uint160(i * 1000));
-            PoolKey memory key = _makeKey(TOKEN_A, TOKEN_B, 500, 10, hooks);
-            _mockSlot0(PoolId.unwrap(key.toId()), 1 << 96);
-            router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, hooks);
-        }
-
-        // 9th registration should require liquidity challenge
-        address newHooks = address(uint160(9000));
-        PoolKey memory newKey = _makeKey(TOKEN_A, TOKEN_B, 500, 10, newHooks);
-        _mockSlot0(PoolId.unwrap(newKey.toId()), 1 << 96);
-
-        // Mock getLiquidity: challenger has 0 liquidity, all incumbents have 0
-        // Since challenger needs MORE, this should fail
-        _mockLiquidity(PoolId.unwrap(newKey.toId()), 0);
-        for (uint256 i = 1; i <= 8; i++) {
-            address hooks = address(uint160(i * 1000));
-            PoolKey memory key = _makeKey(TOKEN_A, TOKEN_B, 500, 10, hooks);
-            _mockLiquidity(PoolId.unwrap(key.toId()), 0);
-        }
-
-        vm.expectRevert(bytes("Insufficient liquidity to replace"));
-        router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, newHooks);
+    function test_registerV4Pool_reverts_whenBoardFull() public {
+        _fillBoard(100e18);
+        _mockPool(address(uint160(9000)), 1000e18);
+        vm.expectRevert(V4PoolRegistry.BoardFull.selector);
+        router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, address(uint160(9000)));
     }
 
-    function test_registerV4Pool_replacesLowestScore() public {
-        // Register 8 pools
+    // ======== Two-phase challenge ========
+
+    function test_challenge_fullFlow_evictsLowestLiquidityIncumbent() public {
+        _fillBoard(100e18);
+        // Incumbent #3 is the weakest
+        _mockLiquidityFor(address(uint160(3000)), 5e18);
+
+        address challenger = address(uint160(9000));
+        _mockPool(challenger, 1000e18);
+        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger);
+
+        vm.warp(block.timestamp + CHALLENGE_DELAY);
+        bool success = router.finalizeV4Challenge(TOKEN_A, TOKEN_B);
+        assertTrue(success, "Challenge must succeed against the weakest unshielded incumbent");
+    }
+
+    function test_challenge_reverts_beforeDelay() public {
+        _fillBoard(100e18);
+        address challenger = address(uint160(9000));
+        _mockPool(challenger, 1000e18);
+        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger);
+
+        vm.warp(block.timestamp + CHALLENGE_DELAY - 1);
+        vm.expectRevert(V4PoolRegistry.ChallengeNotReady.selector);
+        router.finalizeV4Challenge(TOKEN_A, TOKEN_B);
+    }
+
+    function test_challenge_jitLiquidity_failsAtFinalize() public {
+        _fillBoard(100e18);
+        address challenger = address(uint160(9000));
+        _mockPool(challenger, 1000e18); // huge at declaration (the JIT deposit)
+        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger);
+
+        // JIT capital leaves before finalization
+        _mockLiquidityFor(challenger, 1);
+
+        vm.warp(block.timestamp + CHALLENGE_DELAY);
+        bool success = router.finalizeV4Challenge(TOKEN_A, TOKEN_B);
+        assertFalse(success, "Liquidity withdrawn during the delay must lose the challenge");
+    }
+
+    function test_challenge_recentWinShieldsIncumbent() public {
+        _fillBoard(100e18);
+        // Incumbent #3 is weakest by liquidity BUT recently won a routed swap
+        _mockLiquidityFor(address(uint160(3000)), 5e18);
+        router.exposedRecordV4Win(TOKEN_A, TOKEN_B, 500, 10, address(uint160(3000)));
+        // Incumbent #5 is the weakest UNSHIELDED entry
+        _mockLiquidityFor(address(uint160(5000)), 50e18);
+
+        address challenger = address(uint160(9000));
+        _mockPool(challenger, 1000e18);
+        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger);
+        vm.warp(block.timestamp + CHALLENGE_DELAY);
+        assertTrue(router.finalizeV4Challenge(TOKEN_A, TOKEN_B));
+
+        // The shielded winner survived; #5 was evicted instead. Verify by re-challenging:
+        // #3 must still be listed (duplicate check hits), #5 must not be
+        vm.expectRevert(V4PoolRegistry.DuplicatePool.selector);
+        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, address(uint160(3000)));
+        _mockPool(address(uint160(5000)), 10e18);
+        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, address(uint160(5000))); // relisting attempt OK
+    }
+
+    function test_challenge_shieldExpires_afterTwoEpochs() public {
+        _fillBoard(100e18);
+        _mockLiquidityFor(address(uint160(3000)), 5e18);
+        router.exposedRecordV4Win(TOKEN_A, TOKEN_B, 500, 10, address(uint160(3000)));
+
+        // Two epochs later the win no longer shields
+        vm.warp(block.timestamp + 2 weeks + 1 days);
+        address challenger = address(uint160(9000));
+        _mockPool(challenger, 1000e18);
+        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger);
+        vm.warp(block.timestamp + CHALLENGE_DELAY);
+        assertTrue(router.finalizeV4Challenge(TOKEN_A, TOKEN_B), "Stale win must not shield");
+
+        // #3 is gone: relisting it as a challenger works (no duplicate revert)
+        _mockPool(address(uint160(3000)), 10e18);
+        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, address(uint160(3000)));
+    }
+
+    function test_challenge_allShielded_boardIsHealthy() public {
+        _fillBoard(100e18);
         for (uint256 i = 1; i <= 8; i++) {
-            address hooks = address(uint160(i * 1000));
-            PoolKey memory key = _makeKey(TOKEN_A, TOKEN_B, 500, 10, hooks);
-            _mockSlot0(PoolId.unwrap(key.toId()), 1 << 96);
-            router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, hooks);
+            router.exposedRecordV4Win(TOKEN_A, TOKEN_B, 500, 10, address(uint160(i * 1000)));
         }
+        address challenger = address(uint160(9000));
+        _mockPool(challenger, 1000e18);
+        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger);
+        vm.warp(block.timestamp + CHALLENGE_DELAY);
+        assertFalse(router.finalizeV4Challenge(TOKEN_A, TOKEN_B), "A fully shielded board cannot be evicted from");
+    }
 
-        // Now register a 9th with higher liquidity than the lowest-scored incumbent
-        address newHooks = address(uint160(9000));
-        PoolKey memory newKey = _makeKey(TOKEN_A, TOKEN_B, 500, 10, newHooks);
-        _mockSlot0(PoolId.unwrap(newKey.toId()), 1 << 96);
-        _mockLiquidity(PoolId.unwrap(newKey.toId()), 1000e18);
+    function test_challenge_onePerPair_andExpiryFreesSlot() public {
+        _fillBoard(100e18);
+        address challengerOne = address(uint160(9000));
+        _mockPool(challengerOne, 1000e18);
+        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challengerOne);
 
-        // Mock incumbent liquidities to be lower
-        for (uint256 i = 1; i <= 8; i++) {
-            address hooks = address(uint160(i * 1000));
-            PoolKey memory key = _makeKey(TOKEN_A, TOKEN_B, 500, 10, hooks);
-            _mockLiquidity(PoolId.unwrap(key.toId()), 100e18);
-        }
+        address challengerTwo = address(uint160(9100));
+        _mockPool(challengerTwo, 1000e18);
+        vm.expectRevert(V4PoolRegistry.ChallengePending.selector);
+        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challengerTwo);
 
-        // Should succeed: challenger has 1000e18 > incumbent's 100e18
-        router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, newHooks);
+        // Past expiry the stale challenge no longer blocks the pair
+        vm.warp(block.timestamp + CHALLENGE_EXPIRY + 1);
+        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challengerTwo);
+    }
+
+    function test_challenge_expired_finalizesAsFailure() public {
+        _fillBoard(100e18);
+        address challenger = address(uint160(9000));
+        _mockPool(challenger, 1000e18);
+        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger);
+
+        vm.warp(block.timestamp + CHALLENGE_EXPIRY + 1);
+        assertFalse(router.finalizeV4Challenge(TOKEN_A, TOKEN_B), "Expired challenge must fail, not evict");
+    }
+
+    function test_startChallenge_reverts_zeroLiquidityChallenger() public {
+        _fillBoard(100e18);
+        address challenger = address(uint160(9000));
+        _mockPool(challenger, 0);
+        vm.expectRevert(V4PoolRegistry.ChallengerHasNoLiquidity.selector);
+        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger);
     }
 
     // ======== Helpers ========
+
+    function _fillBoard(uint128 liquidityEach) internal {
+        for (uint256 i = 1; i <= 8; i++) {
+            address hooks = address(uint160(i * 1000));
+            _mockPool(hooks, liquidityEach);
+            router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, hooks);
+        }
+    }
+
+    function _mockPool(address hooks, uint128 liquidity) internal {
+        PoolKey memory key = _makeKey(TOKEN_A, TOKEN_B, 500, 10, hooks);
+        _mockSlot0(PoolId.unwrap(key.toId()), 1 << 96);
+        _mockLiquidity(PoolId.unwrap(key.toId()), liquidity);
+    }
+
+    function _mockLiquidityFor(address hooks, uint128 liquidity) internal {
+        PoolKey memory key = _makeKey(TOKEN_A, TOKEN_B, 500, 10, hooks);
+        _mockLiquidity(PoolId.unwrap(key.toId()), liquidity);
+    }
 
     function _makeKey(address tokenA, address tokenB, uint24 fee, int24 tickSpacing, address hooks)
         private
@@ -396,21 +488,26 @@ contract V4LeaderboardTest is Test {
         return PoolKey({currency0: c0, currency1: c1, fee: fee, tickSpacing: tickSpacing, hooks: IHooks(hooks)});
     }
 
-    function _mockSlot0(bytes32 poolId, uint160 sqrtPriceX96) private {
-        // StateLibrary reads slot0 via extsload. We mock the extsload call.
-        bytes32 stateSlot = keccak256(abi.encodePacked(poolId, bytes32(uint256(6))));
-        // Pack sqrtPriceX96 into bottom 160 bits of slot0
-        bytes32 packedSlot0 = bytes32(uint256(sqrtPriceX96));
-        vm.mockCall(POOL_MANAGER, abi.encodeWithSignature("extsload(bytes32)", stateSlot), abi.encode(packedSlot0));
+    /// @dev StateLibrary reads via extsload(slot); mock the specific slots
+    function _mockSlot0(bytes32 poolId, uint160 sqrtPriceX96) internal {
+        bytes32 stateSlot = _poolStateSlot(poolId);
+        vm.mockCall(
+            POOL_MANAGER,
+            abi.encodeWithSignature("extsload(bytes32)", stateSlot),
+            abi.encode(bytes32(uint256(sqrtPriceX96)))
+        );
     }
 
-    function _mockLiquidity(bytes32 poolId, uint128 liquidity) private {
-        bytes32 stateSlot = keccak256(abi.encodePacked(poolId, bytes32(uint256(6))));
-        bytes32 liquiditySlot = bytes32(uint256(stateSlot) + 3);
+    function _mockLiquidity(bytes32 poolId, uint128 liquidity) internal {
+        bytes32 liquiditySlot = bytes32(uint256(_poolStateSlot(poolId)) + 3);
         vm.mockCall(
             POOL_MANAGER,
             abi.encodeWithSignature("extsload(bytes32)", liquiditySlot),
             abi.encode(bytes32(uint256(liquidity)))
         );
+    }
+
+    function _poolStateSlot(bytes32 poolId) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(poolId, uint256(6)));
     }
 }

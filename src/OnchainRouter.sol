@@ -181,7 +181,7 @@ contract OnchainRouter is
         address swapRecipient = unwrapOutput ? address(this) : recipient;
         amountOut = _swapExactInput(quote, swapRecipient);
 
-        _updateV4Scores(quote);
+        _recordV4Wins(quote);
 
         if (unwrapOutput) {
             IWETH9(intermediateToken).withdraw(amountOut);
@@ -254,7 +254,7 @@ contract OnchainRouter is
         // Realized input is derived from the balance delta below instead.
         _swapExactOutput(quote, swapRecipient);
 
-        _updateV4Scores(quote);
+        _recordV4Wins(quote);
 
         if (unwrapOutput) {
             uint256 outputAmount = quote.amountOut;
@@ -307,12 +307,14 @@ contract OnchainRouter is
         }
     }
 
-    function _updateV4Scores(Quote memory quote) private {
+    /// @notice Stamp routed V4 leaderboard pools with an epoch win: recently useful
+    /// pools are shielded from leaderboard eviction (see V4PoolRegistry)
+    function _recordV4Wins(Quote memory quote) private {
         for (uint256 i = 0; i < quote.path.length; i++) {
             Pool memory pool = quote.path[i];
             if (pool.version == V4) {
                 bytes32 ph = _pairHash(pool.tokenIn, pool.tokenOut);
-                _incrementV4Score(ph, pool.key.fee, pool.key.tickSpacing, address(pool.key.hooks));
+                _recordV4Win(ph, pool.key.fee, pool.key.tickSpacing, address(pool.key.hooks));
             }
         }
     }
