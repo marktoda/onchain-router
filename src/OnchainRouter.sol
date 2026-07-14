@@ -12,10 +12,19 @@ import {IWETH9} from "./interfaces/IWETH9.sol";
 import {SafeTransferLib} from "solmate/src/utils/SafeTransferLib.sol";
 import {ERC20} from "solmate/src/tokens/ERC20.sol";
 import {SwapExecutor} from "./base/SwapExecutor.sol";
+import {Ownable2Step} from "./base/Ownable2Step.sol";
 
 /// @title Onchain Router for Uniswap V2, V3, and V4
 /// @notice Finds and executes optimal swap paths across Uniswap V2, V3, and V4 pools
-contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter, PathGenerator, SwapExecutor {
+contract OnchainRouter is
+    OnchainRouterImmutables,
+    V3Quoter,
+    V2Quoter,
+    V4Quoter,
+    PathGenerator,
+    SwapExecutor,
+    Ownable2Step
+{
     using QuoteLibrary for Quote;
     using QuoteLibrary for Pool;
 
@@ -41,10 +50,65 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter,
         locked = false;
     }
 
-    constructor(address _v2Factory, address _v3Factory, address _poolManager, address _weth)
+    /// @dev Cap on the intermediate set: quoting cost grows linearly per intermediate
+    /// (roughly two extra full pool sweeps each), so the set stays small by construction.
+    uint256 private constant MAX_INTERMEDIATES = 5;
+
+    /// @notice Routing intermediates for 2-hop paths. WETH's OTHER role, the canonical
+    /// wrapper for native ETH (msg.value handling, V4 address(0) aliasing), stays pinned
+    /// to the intermediateToken immutable and is unaffected by this set.
+    address[] public intermediateTokens;
+
+    event IntermediateTokenAdded(address indexed token);
+    event IntermediateTokenRemoved(address indexed token);
+
+    error TooManyIntermediates();
+    error DuplicateIntermediate();
+    error IntermediateNotFound();
+    error InvalidIntermediate();
+
+    constructor(address _v2Factory, address _v3Factory, address _poolManager, address _weth, address _initialOwner)
         OnchainRouterImmutables(_v2Factory, _v3Factory, _poolManager, _weth)
         PathGenerator(_v3Factory)
-    {}
+        Ownable2Step(_initialOwner)
+    {
+        // WETH starts as the sole routing intermediate: behavior at deploy is identical
+        // to the previous hard-coded single-intermediate routing
+        intermediateTokens.push(_weth);
+        emit IntermediateTokenAdded(_weth);
+    }
+
+    /// @notice Register a routing intermediate for 2-hop path search.
+    function addIntermediateToken(address token) external onlyOwner {
+        if (token == address(0)) revert InvalidIntermediate();
+        uint256 length = intermediateTokens.length;
+        if (length >= MAX_INTERMEDIATES) revert TooManyIntermediates();
+        for (uint256 i = 0; i < length; i++) {
+            if (intermediateTokens[i] == token) revert DuplicateIntermediate();
+        }
+        intermediateTokens.push(token);
+        emit IntermediateTokenAdded(token);
+    }
+
+    /// @notice Remove a routing intermediate. Removing WETH from the set only stops it
+    /// being used as a routing hop; native-ETH handling is unaffected.
+    function removeIntermediateToken(address token) external onlyOwner {
+        uint256 length = intermediateTokens.length;
+        for (uint256 i = 0; i < length; i++) {
+            if (intermediateTokens[i] == token) {
+                intermediateTokens[i] = intermediateTokens[length - 1];
+                intermediateTokens.pop();
+                emit IntermediateTokenRemoved(token);
+                return;
+            }
+        }
+        revert IntermediateNotFound();
+    }
+
+    /// @notice Number of configured routing intermediates.
+    function intermediateTokensLength() external view returns (uint256) {
+        return intermediateTokens.length;
+    }
 
     receive() external payable {}
 
@@ -259,27 +323,28 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter,
     // ─────────────────────────────────────────────────────────────
 
     /// @notice Find the optimal route for an exact-input swap.
-    /// @dev Compares direct routes and multi-hop routes through intermediateToken.
-    /// For pairs involving intermediateToken, only single-hop is checked.
+    /// @dev Compares the direct route against a 2-hop route through every configured
+    /// intermediate. An intermediate equal to either end of the pair is skipped (that
+    /// candidate is the direct route); the others still get their multi-hop check.
     function routeExactInput(SwapParams memory params) public view returns (Quote memory bestQuote) {
-        if (params.tokenIn == intermediateToken || params.tokenOut == intermediateToken) {
-            return routeExactInputSingle(params);
+        bestQuote = routeExactInputSingle(params);
+        uint256 length = intermediateTokens.length;
+        for (uint256 i = 0; i < length; i++) {
+            address intermediate = intermediateTokens[i];
+            if (intermediate == params.tokenIn || intermediate == params.tokenOut) continue;
+            bestQuote = routeExactInputMulti(params, intermediate).better(bestQuote);
         }
-
-        Quote memory multi = routeExactInputMulti(params, intermediateToken);
-        Quote memory single = routeExactInputSingle(params);
-        return multi.better(single);
     }
 
     /// @notice Find the optimal route for an exact-output swap.
     function routeExactOutput(SwapParams memory params) public view returns (Quote memory bestQuote) {
-        if (params.tokenIn == intermediateToken || params.tokenOut == intermediateToken) {
-            return routeExactOutputSingle(params);
+        bestQuote = routeExactOutputSingle(params);
+        uint256 length = intermediateTokens.length;
+        for (uint256 i = 0; i < length; i++) {
+            address intermediate = intermediateTokens[i];
+            if (intermediate == params.tokenIn || intermediate == params.tokenOut) continue;
+            bestQuote = routeExactOutputMulti(params, intermediate).better(bestQuote);
         }
-
-        Quote memory multi = routeExactOutputMulti(params, intermediateToken);
-        Quote memory single = routeExactOutputSingle(params);
-        return multi.better(single);
     }
 
     function routeExactInputMulti(SwapParams memory params, address intermediate)

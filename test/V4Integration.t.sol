@@ -50,7 +50,7 @@ contract V4BaseForkTest is Test {
         string memory rpc = vm.envString("BASE_RPC_URL");
         vm.createSelectFork(rpc);
 
-        router = new OnchainRouterExposed(V2_FACTORY, V3_FACTORY, POOL_MANAGER, WETH);
+        router = new OnchainRouterExposed(V2_FACTORY, V3_FACTORY, POOL_MANAGER, WETH, address(this));
         recipient = makeAddr("recipient");
 
         // Probe for V4 pools with default configs
@@ -297,7 +297,7 @@ contract V4LeaderboardTest is Test {
         address v2Factory = address(0xF2);
         vm.etch(v2Factory, hex"00");
 
-        router = new OnchainRouterExposed(v2Factory, v3Factory, POOL_MANAGER, WETH);
+        router = new OnchainRouterExposed(v2Factory, v3Factory, POOL_MANAGER, WETH, address(this));
     }
 
     function test_registerV4Pool_success() public {
