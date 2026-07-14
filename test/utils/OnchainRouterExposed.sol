@@ -40,4 +40,14 @@ contract OnchainRouterExposed is OnchainRouter {
     function externalRouteExactOutputSingle(SwapParams memory params) public view returns (Quote memory bestQuote) {
         bestQuote = routeExactOutputSingle(params);
     }
+
+    /// @dev quotes a single specific V4 pool, bypassing route selection
+    function externalV4QuoteExactIn(SwapHop memory swap) public view returns (uint256 amountOut) {
+        amountOut = v4QuoteExactIn(swap);
+    }
+
+    /// @dev quotes a single specific V4 pool for exact output, bypassing route selection
+    function externalV4QuoteExactOut(SwapHop memory swap) public view returns (uint256 amountIn) {
+        amountIn = v4QuoteExactOut(swap);
+    }
 }
