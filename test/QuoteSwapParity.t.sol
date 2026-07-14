@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.0;
 
-import {SwapParams, Quote} from "../src/base/OnchainRouterStructs.sol";
+import {SwapParams, Quote, Pool, SwapHop, V4} from "../src/base/OnchainRouterStructs.sol";
+import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
+import {PoolKey} from "v4-core/src/types/PoolKey.sol";
+import {PoolIdLibrary} from "v4-core/src/types/PoolId.sol";
+import {Currency} from "v4-core/src/types/Currency.sol";
+import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
+import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
 import {OnchainRouterExposed} from "./utils/OnchainRouterExposed.sol";
 import {MainnetForkFixture, BaseForkFixture, hasV4Hop} from "./utils/ForkFixtures.sol";
 import {ERC20} from "solmate/src/tokens/ERC20.sol";
@@ -156,6 +162,98 @@ contract QuoteSwapParityV4BaseTest is BaseForkFixture {
         uint256 amountIn = router.swapExactOutput{value: quote.amountIn}(quote, recipient, block.timestamp, false);
         assertEq(amountIn, quote.amountIn, "V4 exact-out: realized input must equal quote bit-for-bit");
         assertEq(ERC20(USDC).balanceOf(recipient), amountOut, "V4 exact-out: delivered amount must be exact");
+    }
+
+    receive() external payable {}
+}
+
+/// @notice F8: V4 parity must hold when the pool charges a protocol fee.
+/// @dev Pool.swap composes swapFee = protocolFee + lpFee; a quoter that only uses key.fee
+/// quotes high on every protocol-fee pool and the exact-bound design then reverts every
+/// swap. The fee is set here by impersonating the protocol fee controller on a live pool.
+contract QuoteSwapParityV4ProtocolFeeTest is BaseForkFixture {
+    using StateLibrary for IPoolManager;
+    using PoolIdLibrary for PoolKey;
+
+    OnchainRouterExposed router;
+    IPoolManager pm;
+
+    address recipient;
+    PoolKey poolKey;
+    bool poolFound;
+    address tokenIn; // address(0) for native ETH pools
+
+    function setUp() public {
+        _forkBase(32_000_000);
+        pm = IPoolManager(POOL_MANAGER);
+        router = new OnchainRouterExposed(V2_FACTORY, V3_FACTORY, POOL_MANAGER, WETH);
+        recipient = makeAddr("recipient");
+
+        // Probe default hookless configs for an ETH/USDC or WETH/USDC pool with real
+        // liquidity (an initialized-but-empty pool would quote zero and prove nothing)
+        uint24[4] memory fees = [uint24(500), uint24(3000), uint24(10000), uint24(100)];
+        int24[4] memory spacings = [int24(10), int24(60), int24(200), int24(1)];
+        address[2] memory candidates = [address(0), WETH];
+        for (uint256 c = 0; c < 2 && !poolFound; c++) {
+            for (uint256 i = 0; i < 4 && !poolFound; i++) {
+                PoolKey memory key = _makeKey(candidates[c], USDC, fees[i], spacings[i]);
+                (uint160 sqrtPrice,,,) = pm.getSlot0(key.toId());
+                if (sqrtPrice != 0 && pm.getLiquidity(key.toId()) > 1e15) {
+                    poolKey = key;
+                    poolFound = true;
+                    tokenIn = candidates[c];
+                }
+            }
+        }
+
+        if (poolFound) {
+            // 0.05% protocol fee in both directions (max is 0.1%)
+            uint24 protocolFee = (uint24(500) << 12) | uint24(500);
+            vm.prank(pm.protocolFeeController());
+            pm.setProtocolFee(poolKey, protocolFee);
+        }
+    }
+
+    function _makeKey(address tokenA, address tokenB, uint24 fee, int24 tickSpacing)
+        private
+        pure
+        returns (PoolKey memory)
+    {
+        Currency c0 = Currency.wrap(tokenA);
+        Currency c1 = Currency.wrap(tokenB);
+        if (c0 > c1) (c0, c1) = (c1, c0);
+        return PoolKey({currency0: c0, currency1: c1, fee: fee, tickSpacing: tickSpacing, hooks: IHooks(address(0))});
+    }
+
+    function _poolQuote(uint256 amountIn) internal view returns (Quote memory quote, uint256 quoted) {
+        Pool[] memory path = new Pool[](1);
+        path[0] =
+            Pool({tokenIn: tokenIn, tokenOut: USDC, fee: poolKey.fee, pool: address(0), version: V4, key: poolKey});
+        quoted = router.externalV4QuoteExactIn(SwapHop({pool: path[0], amountSpecified: amountIn}));
+        quote = Quote({path: path, amountIn: amountIn, amountOut: quoted});
+    }
+
+    /// forge-config: default.fuzz.runs = 24
+    function testFuzz_parity_v4_protocolFee_exactIn(uint256 amountIn) public {
+        vm.skip(!poolFound);
+        amountIn = bound(amountIn, 0.0001 ether, 20 ether);
+
+        (Quote memory quote, uint256 quoted) = _poolQuote(amountIn);
+        vm.assume(quoted > 0);
+
+        vm.deal(address(this), amountIn);
+        uint256 amountOut = router.swapExactInput{value: amountIn}(quote, recipient, block.timestamp, false);
+        assertEq(amountOut, quoted, "protocol-fee pool: realized output must equal quote bit-for-bit");
+    }
+
+    function test_parity_v4_protocolFee_singleShot() public {
+        vm.skip(!poolFound);
+        (Quote memory quote, uint256 quoted) = _poolQuote(0.05 ether);
+        assertGt(quoted, 0, "Probed pool must produce a usable quote");
+
+        vm.deal(address(this), 0.05 ether);
+        uint256 amountOut = router.swapExactInput{value: 0.05 ether}(quote, recipient, block.timestamp, false);
+        assertEq(amountOut, quoted, "protocol-fee pool: realized output must equal quote bit-for-bit");
     }
 
     receive() external payable {}
