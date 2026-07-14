@@ -194,8 +194,8 @@ contract QuoteSwapParityV4ProtocolFeeTest is BaseForkFixture {
         uint24[4] memory fees = [uint24(500), uint24(3000), uint24(10000), uint24(100)];
         int24[4] memory spacings = [int24(10), int24(60), int24(200), int24(1)];
         address[2] memory candidates = [address(0), WETH];
-        for (uint256 c = 0; c < 2 && !poolFound; c++) {
-            for (uint256 i = 0; i < 4 && !poolFound; i++) {
+        for (uint256 c = 0; c < candidates.length && !poolFound; c++) {
+            for (uint256 i = 0; i < fees.length && !poolFound; i++) {
                 PoolKey memory key = _makeKey(candidates[c], USDC, fees[i], spacings[i]);
                 (uint160 sqrtPrice,,,) = pm.getSlot0(key.toId());
                 if (sqrtPrice != 0 && pm.getLiquidity(key.toId()) > 1e15) {
@@ -208,7 +208,8 @@ contract QuoteSwapParityV4ProtocolFeeTest is BaseForkFixture {
 
         if (poolFound) {
             // 0.05% protocol fee in both directions (max is 0.1%)
-            uint24 protocolFee = (uint24(500) << 12) | uint24(500);
+            // Asymmetric on purpose: the two directional fee getters must diverge
+            uint24 protocolFee = (uint24(700) << 12) | uint24(300);
             vm.prank(pm.protocolFeeController());
             pm.setProtocolFee(poolKey, protocolFee);
         }
@@ -244,6 +245,43 @@ contract QuoteSwapParityV4ProtocolFeeTest is BaseForkFixture {
         vm.deal(address(this), amountIn);
         uint256 amountOut = router.swapExactInput{value: amountIn}(quote, recipient, block.timestamp, false);
         assertEq(amountOut, quoted, "protocol-fee pool: realized output must equal quote bit-for-bit");
+    }
+
+    /// @notice Exact-out through the protocol-fee pool: covers the fee composition on
+    /// the exact-output quote path
+    function test_parity_v4_protocolFee_exactOut() public {
+        vm.skip(!poolFound);
+
+        uint256 amountOut = 1_000e6;
+        Pool[] memory path = new Pool[](1);
+        path[0] =
+            Pool({tokenIn: tokenIn, tokenOut: USDC, fee: poolKey.fee, pool: address(0), version: V4, key: poolKey});
+        uint256 quotedIn = router.externalV4QuoteExactOut(SwapHop({pool: path[0], amountSpecified: amountOut}));
+        vm.assume(quotedIn > 0 && quotedIn < 100 ether);
+
+        Quote memory quote = Quote({path: path, amountIn: quotedIn, amountOut: amountOut});
+        vm.deal(address(this), quotedIn);
+        uint256 amountIn = router.swapExactOutput{value: quotedIn}(quote, recipient, block.timestamp, false);
+        assertEq(amountIn, quotedIn, "protocol-fee exact-out: realized input must equal quote bit-for-bit");
+    }
+
+    /// @notice The reverse direction (USDC in): exercises getOneForZeroFee, which differs
+    /// from the zeroForOne fee because the configured protocol fee is asymmetric
+    function test_parity_v4_protocolFee_oneForZero() public {
+        vm.skip(!poolFound);
+
+        _dealUSDC(address(this), 10_000e6);
+        ERC20(USDC).approve(address(router), type(uint256).max);
+
+        Pool[] memory path = new Pool[](1);
+        path[0] =
+            Pool({tokenIn: USDC, tokenOut: tokenIn, fee: poolKey.fee, pool: address(0), version: V4, key: poolKey});
+        uint256 quoted = router.externalV4QuoteExactIn(SwapHop({pool: path[0], amountSpecified: 5_000e6}));
+        vm.assume(quoted > 0);
+
+        Quote memory quote = Quote({path: path, amountIn: 5_000e6, amountOut: quoted});
+        uint256 amountOut = router.swapExactInput(quote, recipient, block.timestamp, false);
+        assertEq(amountOut, quoted, "protocol-fee oneForZero: realized output must equal quote bit-for-bit");
     }
 
     function test_parity_v4_protocolFee_singleShot() public {
