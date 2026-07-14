@@ -92,6 +92,38 @@ contract ThreeHopTest is MainnetForkFixture {
         assertTrue(threeHop.path.length == 2 || threeHop.path.length == 3, "Winner must be a real route");
     }
 
+    function test_threeHop_exactOut_neverWorseThanTwoHop() public {
+        // Competing 2-hop (A -> Y -> B) and 3-hop (A -> X -> Y -> B) routes must both be
+        // searched; the superset result can never cost more input than the 2-hop route
+        _createPool(address(tokenA), address(tokenY));
+
+        SwapParams memory params =
+            SwapParams({amountSpecified: 50e18, tokenIn: address(tokenA), tokenOut: address(tokenB)});
+        Quote memory twoHop = router.routeExactOutput(params);
+        assertGt(twoHop.amountIn, 0, "2-hop route must exist (test precondition)");
+        assertTrue(twoHop.amountIn != type(uint256).max, "2-hop route must be real");
+
+        Quote memory threeHop = router.routeExactOutput3Hop(params);
+        assertLe(threeHop.amountIn, twoHop.amountIn, "Superset search must never cost more");
+        assertTrue(threeHop.path.length == 2 || threeHop.path.length == 3, "Winner must be a real route");
+    }
+
+    function test_threeHop_exactOut_skipsUnfillableLeg() public {
+        // Make the X -> Y leg exist but be far too shallow to fill the requested output:
+        // its exact-out quote returns the uint-max sentinel, which the 3-hop search must
+        // skip rather than fold into the result
+        SwapParams memory params =
+            SwapParams({amountSpecified: 50_000e18, tokenIn: address(tokenA), tokenOut: address(tokenB)});
+        Quote memory quote = router.routeExactOutput3Hop(params);
+
+        // The only chain runs through the shallow legs; an unfillable request must come
+        // back unroutable (0 or sentinel), never a poisoned combined quote
+        assertTrue(
+            quote.amountIn == 0 || quote.amountIn == type(uint256).max,
+            "Unfillable 3-hop request must be reported unroutable, not mis-priced"
+        );
+    }
+
     // ======== Execution: the executor is N-hop agnostic ========
 
     function test_threeHop_exactIn_executesWithParity() public {

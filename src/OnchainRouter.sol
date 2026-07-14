@@ -411,6 +411,9 @@ contract OnchainRouter is
     function routeExactOutput3Hop(SwapParams memory params) external view returns (Quote memory bestQuote) {
         bestQuote = routeExactOutput(params);
         uint256 length = intermediateTokens.length;
+        // The outer loop walks the LAST intermediate (second) because exact-output legs
+        // are sized backwards from the requested output; the inner loop then prices the
+        // earlier hops for each candidate tail
         for (uint256 i = 0; i < length; i++) {
             address second = intermediateTokens[i];
             if (second == params.tokenIn || second == params.tokenOut) continue;
