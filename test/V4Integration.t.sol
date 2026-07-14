@@ -216,7 +216,9 @@ contract V4BaseForkTest is Test {
 
         SwapParams memory params = SwapParams({amountSpecified: ETH_AMOUNT, tokenIn: WETH, tokenOut: USDC});
         Quote memory quote = router.routeExactInput(params);
-        vm.skip(!hasV4Hop(quote));
+        // Early return, not vm.skip: Foundry forbids skipping after state-changing calls,
+        // and whether V4 wins this live route is only known after quoting
+        if (!hasV4Hop(quote)) return;
 
         // Unmet bound must revert inside the V4 unlock path
         vm.expectRevert(SwapExecutor.TooLittleReceived.selector);
@@ -236,7 +238,8 @@ contract V4BaseForkTest is Test {
 
         SwapParams memory params = SwapParams({amountSpecified: USDC_AMOUNT, tokenIn: WETH, tokenOut: USDC});
         Quote memory quote = router.routeExactOutput(params);
-        vm.skip(!hasV4Hop(quote));
+        // Early return, not vm.skip: see exact-in variant
+        if (!hasV4Hop(quote)) return;
 
         uint256 maxAmountIn = (quote.amountIn * 101) / 100;
         uint256 balanceBefore = address(this).balance;
