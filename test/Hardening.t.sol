@@ -63,7 +63,7 @@ contract HardeningForkTest is MainnetForkFixture {
 
     function setUp() public {
         _forkMainnet();
-        router = new OnchainRouterExposed(V2_FACTORY, V3_FACTORY, address(0), WETH);
+        router = new OnchainRouterExposed(V2_FACTORY, V3_FACTORY, address(0), WETH, address(this));
         recipient = makeAddr("recipient");
     }
 

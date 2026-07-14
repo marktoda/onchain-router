@@ -24,7 +24,7 @@ contract QuoteSwapParityMainnetTest is MainnetForkFixture {
 
     function setUp() public {
         _forkMainnet();
-        router = new OnchainRouterExposed(V2_FACTORY, V3_FACTORY, address(0), WETH);
+        router = new OnchainRouterExposed(V2_FACTORY, V3_FACTORY, address(0), WETH, address(this));
         recipient = makeAddr("recipient");
     }
 
@@ -127,7 +127,7 @@ contract QuoteSwapParityV4BaseTest is BaseForkFixture {
     function setUp() public {
         // Pinned for reproducible fuzz counterexamples
         _forkBase(32_000_000);
-        router = new OnchainRouterExposed(V2_FACTORY, V3_FACTORY, POOL_MANAGER, WETH);
+        router = new OnchainRouterExposed(V2_FACTORY, V3_FACTORY, POOL_MANAGER, WETH, address(this));
         recipient = makeAddr("recipient");
     }
 
@@ -186,7 +186,7 @@ contract QuoteSwapParityV4ProtocolFeeTest is BaseForkFixture {
     function setUp() public {
         _forkBase(32_000_000);
         pm = IPoolManager(POOL_MANAGER);
-        router = new OnchainRouterExposed(V2_FACTORY, V3_FACTORY, POOL_MANAGER, WETH);
+        router = new OnchainRouterExposed(V2_FACTORY, V3_FACTORY, POOL_MANAGER, WETH, address(this));
         recipient = makeAddr("recipient");
 
         // Probe default hookless configs for an ETH/USDC or WETH/USDC pool with real

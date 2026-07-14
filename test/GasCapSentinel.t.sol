@@ -38,8 +38,9 @@ contract GasCapSentinelTest is BaseForkFixture {
         tokenA = new MockERC20("TokenA", "TKA", 18);
         tokenB = new MockERC20("TokenB", "TKB", 18);
 
-        router =
-            new OnchainRouterExposed(address(new MockV2Factory()), address(new MockV3Factory()), POOL_MANAGER, WETH);
+        router = new OnchainRouterExposed(
+            address(new MockV2Factory()), address(new MockV3Factory()), POOL_MANAGER, WETH, address(this)
+        );
 
         (Currency c0, Currency c1) = address(tokenA) < address(tokenB)
             ? (Currency.wrap(address(tokenA)), Currency.wrap(address(tokenB)))
