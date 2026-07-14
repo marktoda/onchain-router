@@ -93,6 +93,40 @@ contract GasCapSentinelTest is BaseForkFixture {
         assertEq(quotedIn, type(uint256).max, "exact-out gas exhaustion must return the uint max sentinel, not revert");
     }
 
+    /// @notice A pair whose ONLY pool gas-caps must be reported unroutable: exact-in
+    /// quotes 0 and exact-out quotes the uint-max sentinel. This is the non-vacuous half
+    /// of the property: with no healthy pool to win on economics, only correct sentinel
+    /// handling produces these outcomes instead of a bogus winning quote.
+    function test_routeSelection_onlySentinelPool_isUnroutable() public {
+        MockERC20 tokenC = new MockERC20("TokenC", "TKC", 18);
+        MockERC20 tokenD = new MockERC20("TokenD", "TKD", 18);
+        (Currency c0, Currency c1) = address(tokenC) < address(tokenD)
+            ? (Currency.wrap(address(tokenC)), Currency.wrap(address(tokenD)))
+            : (Currency.wrap(address(tokenD)), Currency.wrap(address(tokenC)));
+        PoolKey memory loneDense =
+            PoolKey({currency0: c0, currency1: c1, fee: 100, tickSpacing: 1, hooks: IHooks(address(0))});
+        manager.initialize(loneDense, SQRT_PRICE_1_1);
+        tokenC.mint(address(this), type(uint128).max);
+        tokenD.mint(address(this), type(uint128).max);
+        tokenC.approve(address(lpRouter), type(uint256).max);
+        tokenD.approve(address(lpRouter), type(uint256).max);
+        for (int24 t = -DENSE_TICKS; t < DENSE_TICKS; t++) {
+            lpRouter.modifyLiquidity(
+                loneDense,
+                ModifyLiquidityParams({tickLower: t, tickUpper: t + 1, liquidityDelta: int256(1e15), salt: 0}),
+                ""
+            );
+        }
+
+        SwapParams memory params =
+            SwapParams({amountSpecified: 100_000e18, tokenIn: address(tokenC), tokenOut: address(tokenD)});
+        Quote memory exactIn = router.externalRouteExactInputSingle(params);
+        assertEq(exactIn.amountOut, 0, "Gas-capped only-pool must make exact-in unroutable, not mis-quoted");
+
+        Quote memory exactOut = router.externalRouteExactOutputSingle(params);
+        assertEq(exactOut.amountIn, type(uint256).max, "Gas-capped only-pool must surface the exact-out sentinel");
+    }
+
     function test_routeSelection_treatsSentinelPoolAsUnusable() public {
         // Both pools exist for the pair as default configs; the dense pool gas-caps while
         // the healthy pool quotes fine. The router must pick the healthy pool.

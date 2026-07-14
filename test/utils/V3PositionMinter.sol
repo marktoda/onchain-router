@@ -8,13 +8,15 @@ import {SafeTransferLib} from "solmate/src/utils/SafeTransferLib.sol";
 /// @notice Minimal V3 mint-callback helper: holds token balances and pays the pool
 /// whatever the mint requires.
 contract V3PositionMinter {
+    error BadCaller();
+
     function mint(address pool, int24 tickLower, int24 tickUpper, uint128 liquidity) external {
         IUniswapV3Pool(pool).mint(address(this), tickLower, tickUpper, liquidity, abi.encode(pool));
     }
 
     function uniswapV3MintCallback(uint256 amount0Owed, uint256 amount1Owed, bytes calldata data) external {
         address pool = abi.decode(data, (address));
-        require(msg.sender == pool, "bad caller");
+        if (msg.sender != pool) revert BadCaller();
         if (amount0Owed > 0) {
             SafeTransferLib.safeTransfer(ERC20(IUniswapV3Pool(pool).token0()), pool, amount0Owed);
         }
