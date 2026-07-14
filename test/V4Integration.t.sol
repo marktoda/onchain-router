@@ -341,7 +341,7 @@ contract V4LeaderboardTest is Test {
         router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger);
 
         vm.warp(block.timestamp + CHALLENGE_DELAY);
-        bool success = router.finalizeV4Challenge(TOKEN_A, TOKEN_B);
+        bool success = router.finalizeV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger);
         assertTrue(success, "Challenge must succeed against the weakest unshielded incumbent");
     }
 
@@ -353,7 +353,7 @@ contract V4LeaderboardTest is Test {
 
         vm.warp(block.timestamp + CHALLENGE_DELAY - 1);
         vm.expectRevert(V4PoolRegistry.ChallengeNotReady.selector);
-        router.finalizeV4Challenge(TOKEN_A, TOKEN_B);
+        router.finalizeV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger);
     }
 
     function test_challenge_jitLiquidity_failsAtFinalize() public {
@@ -366,7 +366,7 @@ contract V4LeaderboardTest is Test {
         _mockLiquidityFor(challenger, 1);
 
         vm.warp(block.timestamp + CHALLENGE_DELAY);
-        bool success = router.finalizeV4Challenge(TOKEN_A, TOKEN_B);
+        bool success = router.finalizeV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger);
         assertFalse(success, "Liquidity withdrawn during the delay must lose the challenge");
     }
 
@@ -382,7 +382,7 @@ contract V4LeaderboardTest is Test {
         _mockPool(challenger, 1000e18);
         router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger);
         vm.warp(block.timestamp + CHALLENGE_DELAY);
-        assertTrue(router.finalizeV4Challenge(TOKEN_A, TOKEN_B));
+        assertTrue(router.finalizeV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger));
 
         // The shielded winner survived; #5 was evicted instead. Verify by re-challenging:
         // #3 must still be listed (duplicate check hits), #5 must not be
@@ -403,7 +403,7 @@ contract V4LeaderboardTest is Test {
         _mockPool(challenger, 1000e18);
         router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger);
         vm.warp(block.timestamp + CHALLENGE_DELAY);
-        assertTrue(router.finalizeV4Challenge(TOKEN_A, TOKEN_B), "Stale win must not shield");
+        assertTrue(router.finalizeV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger), "Stale win must not shield");
 
         // #3 is gone: relisting it as a challenger works (no duplicate revert)
         _mockPool(address(uint160(3000)), 10e18);
@@ -419,23 +419,67 @@ contract V4LeaderboardTest is Test {
         _mockPool(challenger, 1000e18);
         router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger);
         vm.warp(block.timestamp + CHALLENGE_DELAY);
-        assertFalse(router.finalizeV4Challenge(TOKEN_A, TOKEN_B), "A fully shielded board cannot be evicted from");
+        assertFalse(
+            router.finalizeV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger),
+            "A fully shielded board cannot be evicted from"
+        );
     }
 
-    function test_challenge_onePerPair_andExpiryFreesSlot() public {
+    function test_challenge_perConfigKeying_concurrentChallengersAllowed() public {
         _fillBoard(100e18);
         address challengerOne = address(uint160(9000));
         _mockPool(challengerOne, 1000e18);
         router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challengerOne);
 
+        // A different challenger runs concurrently: one bogus challenge cannot occupy
+        // a per-pair slot and freeze eviction (the griefing DoS the keying prevents)
         address challengerTwo = address(uint160(9100));
         _mockPool(challengerTwo, 1000e18);
-        vm.expectRevert(V4PoolRegistry.ChallengePending.selector);
         router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challengerTwo);
 
-        // Past expiry the stale challenge no longer blocks the pair
+        // Re-declaring the SAME challenge cannot reset its clock while it is live
+        vm.expectRevert(V4PoolRegistry.ChallengePending.selector);
+        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challengerOne);
+
+        // Past expiry the same config can start fresh
         vm.warp(block.timestamp + CHALLENGE_EXPIRY + 1);
-        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challengerTwo);
+        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challengerOne);
+    }
+
+    function test_challenge_finalizesAtExactExpiryBoundary() public {
+        _fillBoard(100e18);
+        _mockLiquidityFor(address(uint160(3000)), 5e18);
+        address challenger = address(uint160(9000));
+        _mockPool(challenger, 1000e18);
+        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger);
+
+        // Exactly at EXPIRY the challenge is still valid and must evict
+        vm.warp(block.timestamp + CHALLENGE_EXPIRY);
+        assertTrue(
+            router.finalizeV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger),
+            "Finalize at exactly the expiry boundary must still succeed"
+        );
+    }
+
+    function test_challenge_previousEpochWin_stillShields() public {
+        _fillBoard(100e18);
+        _mockLiquidityFor(address(uint160(3000)), 5e18);
+        _mockLiquidityFor(address(uint160(5000)), 50e18);
+        router.exposedRecordV4Win(TOKEN_A, TOKEN_B, 500, 10, address(uint160(3000)));
+
+        // Roll into the NEXT epoch: a previous-epoch win must still shield
+        vm.warp((block.timestamp / 1 weeks + 1) * 1 weeks + 1 hours);
+        address challenger = address(uint160(9000));
+        _mockPool(challenger, 1000e18);
+        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger);
+        vm.warp(block.timestamp + CHALLENGE_DELAY);
+        assertTrue(router.finalizeV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger));
+
+        // Shielded previous-epoch winner survived; unshielded #5 was evicted
+        vm.expectRevert(V4PoolRegistry.DuplicatePool.selector);
+        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, address(uint160(3000)));
+        _mockPool(address(uint160(5000)), 10e18);
+        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, address(uint160(5000)));
     }
 
     function test_challenge_expired_finalizesAsFailure() public {
@@ -445,7 +489,9 @@ contract V4LeaderboardTest is Test {
         router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger);
 
         vm.warp(block.timestamp + CHALLENGE_EXPIRY + 1);
-        assertFalse(router.finalizeV4Challenge(TOKEN_A, TOKEN_B), "Expired challenge must fail, not evict");
+        assertFalse(
+            router.finalizeV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger), "Expired challenge must fail, not evict"
+        );
     }
 
     function test_startChallenge_reverts_zeroLiquidityChallenger() public {
