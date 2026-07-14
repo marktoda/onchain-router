@@ -95,6 +95,40 @@ contract IntermediatesTest is MainnetForkFixture {
         router.removeIntermediateToken(USDC);
     }
 
+    function test_constructor_rejectsZeroOwner() public {
+        vm.expectRevert(Ownable2Step.ZeroOwner.selector);
+        new OnchainRouterExposed(V2_FACTORY, V3_FACTORY, address(0), WETH, address(0));
+    }
+
+    function test_acceptOwnership_revertsForNonPendingCaller() public {
+        router.transferOwnership(makeAddr("newOwner"));
+        vm.prank(makeAddr("rando"));
+        vm.expectRevert(Ownable2Step.NotPendingOwner.selector);
+        router.acceptOwnership();
+    }
+
+    function test_intermediateEvents_emitted() public {
+        vm.expectEmit(true, false, false, true);
+        emit OnchainRouter.IntermediateTokenAdded(USDC);
+        router.addIntermediateToken(USDC);
+
+        vm.expectEmit(true, false, false, true);
+        emit OnchainRouter.IntermediateTokenRemoved(USDC);
+        router.removeIntermediateToken(USDC);
+    }
+
+    function test_ownershipEvents_emitted() public {
+        address newOwner = makeAddr("newOwner");
+        vm.expectEmit(true, true, false, true);
+        emit Ownable2Step.OwnershipTransferStarted(address(this), newOwner);
+        router.transferOwnership(newOwner);
+
+        vm.expectEmit(true, true, false, true);
+        emit Ownable2Step.OwnershipTransferred(address(this), newOwner);
+        vm.prank(newOwner);
+        router.acceptOwnership();
+    }
+
     function test_ownership_twoStepTransfer() public {
         address newOwner = makeAddr("newOwner");
         router.transferOwnership(newOwner);

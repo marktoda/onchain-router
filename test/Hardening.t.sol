@@ -392,7 +392,7 @@ contract ExcessClampForkTest is MainnetForkFixture {
 
     function setUp() public {
         _forkMainnet();
-        router = new OnchainRouterExposed(V2_FACTORY, V3_FACTORY, address(0), WETH);
+        router = new OnchainRouterExposed(V2_FACTORY, V3_FACTORY, address(0), WETH, address(this));
         recipient = makeAddr("recipient");
     }
 
@@ -438,7 +438,7 @@ contract ReentrancyExactOutForkTest is MainnetForkFixture {
 
     function setUp() public {
         _forkMainnet();
-        router = new OnchainRouterExposed(V2_FACTORY, V3_FACTORY, address(0), WETH);
+        router = new OnchainRouterExposed(V2_FACTORY, V3_FACTORY, address(0), WETH, address(this));
     }
 
     /// @notice Symmetric coverage of the guard on the exact-output entrypoint

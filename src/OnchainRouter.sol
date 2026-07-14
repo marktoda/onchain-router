@@ -28,14 +28,30 @@ contract OnchainRouter is
     using QuoteLibrary for Quote;
     using QuoteLibrary for Pool;
 
-    error DeadlineExpired();
-    error ETHValueMismatch(uint256 expected, uint256 actual);
-    error Reentrancy();
-    error InputAmountMismatch(uint256 expected, uint256 received);
+    /// @dev Cap on the intermediate set: quoting cost grows linearly per intermediate
+    /// (roughly two extra full pool sweeps each), so the set stays small by construction.
+    uint256 private constant MAX_INTERMEDIATES = 5;
 
     /// @dev Reentrancy lock for the swap entrypoints. Transient so it costs no storage
     /// and always resets at the end of the transaction.
     bool private transient locked;
+
+    /// @notice Routing intermediates for 2-hop paths. WETH's OTHER role, the canonical
+    /// wrapper for native ETH (msg.value handling, V4 address(0) aliasing), stays pinned
+    /// to the intermediateToken immutable and is unaffected by this set.
+    address[] public intermediateTokens;
+
+    event IntermediateTokenAdded(address indexed token);
+    event IntermediateTokenRemoved(address indexed token);
+
+    error DeadlineExpired();
+    error ETHValueMismatch(uint256 expected, uint256 actual);
+    error Reentrancy();
+    error InputAmountMismatch(uint256 expected, uint256 received);
+    error TooManyIntermediates();
+    error DuplicateIntermediate();
+    error IntermediateNotFound();
+    error InvalidIntermediate();
 
     /// @dev Guards the external swap entrypoints only. Internal callback re-entry from
     /// poolManager (unlockCallback) and V3 pools (uniswapV3SwapCallback) happens while
@@ -49,23 +65,6 @@ contract OnchainRouter is
         _;
         locked = false;
     }
-
-    /// @dev Cap on the intermediate set: quoting cost grows linearly per intermediate
-    /// (roughly two extra full pool sweeps each), so the set stays small by construction.
-    uint256 private constant MAX_INTERMEDIATES = 5;
-
-    /// @notice Routing intermediates for 2-hop paths. WETH's OTHER role, the canonical
-    /// wrapper for native ETH (msg.value handling, V4 address(0) aliasing), stays pinned
-    /// to the intermediateToken immutable and is unaffected by this set.
-    address[] public intermediateTokens;
-
-    event IntermediateTokenAdded(address indexed token);
-    event IntermediateTokenRemoved(address indexed token);
-
-    error TooManyIntermediates();
-    error DuplicateIntermediate();
-    error IntermediateNotFound();
-    error InvalidIntermediate();
 
     constructor(address _v2Factory, address _v3Factory, address _poolManager, address _weth, address _initialOwner)
         OnchainRouterImmutables(_v2Factory, _v3Factory, _poolManager, _weth)
