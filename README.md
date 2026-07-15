@@ -121,10 +121,10 @@ GPL-2.0-or-later
 
 ## Quoting guarantees and limits
 
-The view quoters are held to bit-for-bit parity with execution on V2, V3, and V4 core pool math (see `test/QuoteSwapParity.t.sol`, `test/SeededV3Parity.t.sol`, `test/SeededV4Parity.t.sol`): what `routeExact*` quotes is exactly what `swapExact*` delivers in the same state. Protocol fees and initialized dynamic LP fees on V4 pools are included.
+The view quoters are held to bit-for-bit parity with execution on V2, V3, and V4 core pool math (see `test/QuoteSwapParity.t.sol`, `test/SeededV3Parity.t.sol`, `test/SeededV4Parity.t.sol`): what `routeExact*` quotes is exactly what `swapExact*` delivers in the same state. V4 protocol fees are included and covered by tests; dynamic-fee pools quote against their live slot0 fee by construction (a dedicated dynamic-fee parity test is a tracked follow-up).
 
 Known limits integrators should design around:
 
 - **Hooked V4 pools are quoted hook-unaware.** Hooks that change amounts (beforeSwap deltas, LP-fee overrides, custom curves) will quote differently than they execute; under the exact-bound design those swaps revert instead of settling at an unquoted price. Supply explicit bounds when routing hooked pools.
-- **Quoter gas budget.** Each pool quote runs under a 500k gas cap. A pool too tick-dense to quote within budget returns a sentinel (0 for exact-in, `type(uint256).max` for exact-out) and never wins a route (see `test/GasCapSentinel.t.sol`).
+- **Quoter gas budget.** Each pool quote runs under a 500k gas cap. A pool too tick-dense to quote within budget returns a sentinel (0 for exact-in, `type(uint256).max` for exact-out). It never wins a single-hop route (see `test/GasCapSentinel.t.sol`); in multihop exact-output the sentinel is short-circuited so it cannot become a wrapped winning quote either (see `test/MultihopSentinel.t.sol`).
 - **Exact-output beyond pool depth** quotes a partial fill that execution rejects; treat `type(uint256).max` and implausibly small inputs as unroutable.

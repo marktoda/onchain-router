@@ -107,4 +107,24 @@ contract SeededV3ParityTest is MainnetForkFixture {
         assertEq(amountIn, quote.amountIn, "seeded V3 exact-out: realized input must equal quote bit-for-bit");
         assertEq(ERC20(address(token6)).balanceOf(recipient), amountOut, "recipient must receive the exact output");
     }
+
+    /// @notice Reverse direction (token6 -> token18) for the opposite tick-crossing halves.
+    /// forge-config: default.fuzz.runs = 128
+    function testFuzz_seededV3Parity_exactIn_reverse(uint256 amountIn, uint128 l1, uint128 l2, uint128 l3, uint128 l4)
+        public
+    {
+        (l1, l2, l3, l4) = _bounds(l1, l2, l3, l4);
+        _seedPositions(l1, l2, l3, l4);
+
+        amountIn = bound(amountIn, 1e3, 1_000_000e6);
+
+        SwapParams memory params =
+            SwapParams({amountSpecified: amountIn, tokenIn: address(token6), tokenOut: address(token18)});
+        Quote memory quote = router.routeExactInput(params);
+        vm.assume(quote.amountOut > 0);
+
+        uint256 amountOut = router.swapExactInput(quote, recipient, block.timestamp, false);
+        assertEq(amountOut, quote.amountOut, "seeded V3 reverse exact-in: realized output must equal quote bit-for-bit");
+        assertEq(ERC20(address(token18)).balanceOf(recipient), amountOut, "recipient must hold the output");
+    }
 }

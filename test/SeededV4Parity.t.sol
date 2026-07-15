@@ -128,8 +128,9 @@ contract SeededV4ParityTest is BaseForkFixture {
 
         Pool memory pool = _v4Pool(address(token18), address(token6));
         uint256 quotedIn = router.externalV4QuoteExactOut(SwapHop({pool: pool, amountSpecified: amountOut}));
-        // Partial-fill guard: beyond pool depth the quoter reports a partial-fill input
-        // while execution's take() reverts; that behavior is separate from rounding parity
+        // Beyond pool depth the full-fill check returns the uint256.max sentinel (V4 now
+        // matches the V3 behavior), so this assume filters unfillable requests and only
+        // fully-fillable quotes reach the parity assertion below.
         vm.assume(quotedIn > 0 && quotedIn < MAX_IN);
 
         Pool[] memory path = new Pool[](1);
