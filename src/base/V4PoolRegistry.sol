@@ -18,11 +18,16 @@ import {OnchainRouterImmutables} from "./OnchainRouterImmutables.sol";
 /// slot as its target, both pools' active liquidity is sampled at declaration, at any
 /// point during the window (permissionless pokes), and once more at finalization, and
 /// each side's score is the MINIMUM of all its samples. The challenger evicts the named
-/// target only if its min strictly exceeds the target's. Min-scoring makes flash/JIT
-/// liquidity useless (a single low sample pins the score for the whole window) and makes
-/// late defense pointless (a min can never be raised), so winning a slot takes capital
-/// genuinely parked for the full CHALLENGE_DELAY. Slots that just changed hands are
-/// protected by a short cooldown (see SLOT_COOLDOWN).
+/// target only if its min strictly exceeds the target's. A single poke taken while a
+/// challenger's flash/JIT capital is absent pins its score down for the whole window,
+/// and late defense is equally pointless (a min can never be raised). NOTE the vigilance
+/// assumption: with zero pokes only the declaration and finalization samples exist, and
+/// the challenger controls both timings, so the anti-JIT guarantee is exactly as strong
+/// as the pokers watching the challenge. That is the intended trust model — the
+/// challenged incumbent's own LPs are the motivated pokers (one poke defends their
+/// slot), and an incumbent so abandoned that nobody pokes for the whole window is
+/// precisely the kind of entry the board should surrender. Slots that just changed
+/// hands are protected by a short cooldown (see SLOT_COOLDOWN).
 abstract contract V4PoolRegistry is OnchainRouterImmutables {
     using StateLibrary for IPoolManager;
     using PoolIdLibrary for PoolKey;
@@ -150,6 +155,12 @@ abstract contract V4PoolRegistry is OnchainRouterImmutables {
         _checkNotListed(entries, fee, tickSpacing, hooks);
         if (entries.length >= MAX_V4_POOLS_PER_PAIR) revert BoardFull();
 
+        // Accepted-low griefing surface: on a FRESH board an attacker can register 8
+        // dust pools (each needs only nonzero liquidity) and these join-time cooldowns
+        // then lock real pools out of challenging for one SLOT_COOLDOWN. Bounded and
+        // non-renewable: failed/void challenges stamp nothing, so after the one period
+        // every dust slot is permanently contestable, and the default configs keep
+        // routing throughout.
         entries.push(
             V4PoolEntry({
                 fee: fee,
@@ -263,7 +274,9 @@ abstract contract V4PoolRegistry is OnchainRouterImmutables {
     /// of the mechanism: one poke while a challenger's flash/JIT liquidity is absent pins
     /// its score near zero for the rest of the window, and one poke while a stale target
     /// is empty makes topping it up before finalization pointless. Defenders and
-    /// challengers alike are expected to poke at moments favorable to them.
+    /// challengers alike are expected to poke at moments favorable to them; an unpoked
+    /// challenge is decided by the declaration and finalization samples alone, both of
+    /// which the challenger times (see the contract NatSpec for this trust model).
     function pokeV4Challenge(address tokenA, address tokenB, uint24 fee, int24 tickSpacing, address hooks) external {
         bytes32 ph = _pairHash(tokenA, tokenB);
         V4Challenge storage challenge = v4Challenges[_challengeId(ph, fee, tickSpacing, hooks)];
