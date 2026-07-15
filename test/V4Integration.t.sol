@@ -277,7 +277,9 @@ contract V4BaseForkTest is Test {
     receive() external payable {}
 }
 
-/// @notice Unit tests for V4PoolRegistry leaderboard mechanism (no fork needed)
+
+/// @notice Unit tests for the V4PoolRegistry leaderboard mechanism (no fork needed):
+/// pairwise pokeable challenges with min-sampling, and per-slot membership cooldowns.
 contract V4LeaderboardTest is Test {
     using StateLibrary for IPoolManager;
     using PoolIdLibrary for PoolKey;
@@ -292,6 +294,17 @@ contract V4LeaderboardTest is Test {
 
     uint256 constant CHALLENGE_DELAY = 1 days;
     uint256 constant CHALLENGE_EXPIRY = 3 days;
+    uint256 constant SLOT_COOLDOWN = 3 days;
+
+    // Redeclared locally so vm.expectEmit can reference it (topic matching is by signature)
+    event V4ChallengePoked(
+        bytes32 indexed pairHash,
+        uint24 challengerFee,
+        int24 challengerTickSpacing,
+        address challengerHooks,
+        uint128 challengerMin,
+        uint128 targetMin
+    );
 
     function setUp() public {
         vm.etch(POOL_MANAGER, hex"00");
@@ -303,29 +316,43 @@ contract V4LeaderboardTest is Test {
         vm.etch(v2Factory, hex"00");
 
         router = new OnchainRouterExposed(v2Factory, v3Factory, POOL_MANAGER, WETH, address(this));
-        // Start at a realistic timestamp so epoch math has room
+        // Start at a realistic timestamp so time math has room
         vm.warp(365 days * 56);
     }
 
     // ======== Direct registration (non-full board) ========
 
     function test_registerV4Pool_success() public {
-        _mockPool(address(0), 1e18);
-        router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, address(0));
+        _mockPool(address(0xABC), 1e18);
+        router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, address(0xABC));
     }
 
     function test_registerV4Pool_reverts_nonExistentPool() public {
-        PoolKey memory key = _makeKey(TOKEN_A, TOKEN_B, 500, 10, address(0));
+        PoolKey memory key = _makeKey(TOKEN_A, TOKEN_B, 500, 10, address(0xABC));
         _mockSlot0(PoolId.unwrap(key.toId()), 0);
         vm.expectRevert(V4PoolRegistry.PoolDoesNotExist.selector);
+        router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, address(0xABC));
+    }
+
+    function test_registerV4Pool_reverts_zeroLiquidity() public {
+        // Initialized (nonzero sqrtPrice) but empty: not a routing candidate, must not squat a slot
+        _mockPool(address(0xABC), 0);
+        vm.expectRevert(V4PoolRegistry.PoolHasNoLiquidity.selector);
+        router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, address(0xABC));
+    }
+
+    function test_registerV4Pool_reverts_defaultConfig() public {
+        // (500, 10, no hooks) is one of the four default configs: probed unconditionally
+        // during discovery, so letting it register would waste a board slot
+        vm.expectRevert(V4PoolRegistry.DefaultConfigNotAllowed.selector);
         router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, address(0));
     }
 
     function test_registerV4Pool_reverts_duplicate() public {
-        _mockPool(address(0), 1e18);
-        router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, address(0));
+        _mockPool(address(0xABC), 1e18);
+        router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, address(0xABC));
         vm.expectRevert(V4PoolRegistry.DuplicatePool.selector);
-        router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, address(0));
+        router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, address(0xABC));
     }
 
     function test_registerV4Pool_reverts_whenBoardFull() public {
@@ -335,216 +362,354 @@ contract V4LeaderboardTest is Test {
         router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, address(uint160(9000)));
     }
 
-    // ======== Two-phase challenge ========
+    // ======== Challenge declaration ========
 
-    function test_challenge_fullFlow_evictsLowestLiquidityIncumbent() public {
-        _fillBoard(100e18);
-        // Incumbent #3 is the weakest
-        _mockLiquidityFor(address(uint160(3000)), 5e18);
-
-        address challenger = address(uint160(9000));
-        _mockPool(challenger, 1000e18);
-        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger);
-
-        vm.warp(block.timestamp + CHALLENGE_DELAY);
-        bool success = router.finalizeV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger);
-        assertTrue(success, "Challenge must succeed against the weakest unshielded incumbent");
+    function test_startChallenge_reverts_boardNotFull() public {
+        _mockPool(address(uint160(1000)), 100e18);
+        router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, address(uint160(1000)));
+        _mockPool(address(uint160(9000)), 1000e18);
+        vm.expectRevert(V4PoolRegistry.BoardNotFull.selector);
+        _start(address(uint160(9000)), address(uint160(1000)));
     }
 
-    function test_challenge_reverts_beforeDelay() public {
+    function test_startChallenge_reverts_challengerAlreadyListed() public {
         _fillBoard(100e18);
-        address challenger = address(uint160(9000));
-        _mockPool(challenger, 1000e18);
-        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger);
-
-        vm.warp(block.timestamp + CHALLENGE_DELAY - 1);
-        vm.expectRevert(V4PoolRegistry.ChallengeNotReady.selector);
-        router.finalizeV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger);
-    }
-
-    function test_challenge_jitLiquidity_failsAtFinalize() public {
-        _fillBoard(100e18);
-        address challenger = address(uint160(9000));
-        _mockPool(challenger, 1000e18); // huge at declaration (the JIT deposit)
-        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger);
-
-        // JIT capital leaves before finalization
-        _mockLiquidityFor(challenger, 1);
-
-        vm.warp(block.timestamp + CHALLENGE_DELAY);
-        bool success = router.finalizeV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger);
-        assertFalse(success, "Liquidity withdrawn during the delay must lose the challenge");
-    }
-
-    function test_challenge_recentWinShieldsIncumbent() public {
-        _fillBoard(100e18);
-        // Incumbent #3 is weakest by liquidity BUT recently won a routed swap
-        _mockLiquidityFor(address(uint160(3000)), 5e18);
-        router.exposedRecordV4Win(TOKEN_A, TOKEN_B, 500, 10, address(uint160(3000)));
-        // Incumbent #5 is the weakest UNSHIELDED entry
-        _mockLiquidityFor(address(uint160(5000)), 50e18);
-
-        address challenger = address(uint160(9000));
-        _mockPool(challenger, 1000e18);
-        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger);
-        vm.warp(block.timestamp + CHALLENGE_DELAY);
-        assertTrue(router.finalizeV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger));
-
-        // The shielded winner survived; #5 was evicted instead. Verify by re-challenging:
-        // #3 must still be listed (duplicate check hits), #5 must not be
+        _rollPastCooldown();
         vm.expectRevert(V4PoolRegistry.DuplicatePool.selector);
-        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, address(uint160(3000)));
-        _mockPool(address(uint160(5000)), 10e18);
-        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, address(uint160(5000))); // relisting attempt OK
+        _start(address(uint160(1000)), address(uint160(2000)));
     }
 
-    function test_challenge_shieldExpires_afterTwoEpochs() public {
+    function test_startChallenge_reverts_defaultConfigChallenger() public {
         _fillBoard(100e18);
-        _mockLiquidityFor(address(uint160(3000)), 5e18);
-        router.exposedRecordV4Win(TOKEN_A, TOKEN_B, 500, 10, address(uint160(3000)));
-
-        // Two epochs later the win no longer shields
-        vm.warp(block.timestamp + 2 weeks + 1 days);
-        address challenger = address(uint160(9000));
-        _mockPool(challenger, 1000e18);
-        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger);
-        vm.warp(block.timestamp + CHALLENGE_DELAY);
-        assertTrue(router.finalizeV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger), "Stale win must not shield");
-
-        // #3 is gone: relisting it as a challenger works (no duplicate revert)
-        _mockPool(address(uint160(3000)), 10e18);
-        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, address(uint160(3000)));
+        _rollPastCooldown();
+        // A default config can never be a challenger: it is probed anyway and must not
+        // be able to take a board slot
+        vm.expectRevert(V4PoolRegistry.DefaultConfigNotAllowed.selector);
+        _start(address(0), address(uint160(1000)));
     }
 
-    function test_challenge_allShielded_boardIsHealthy() public {
+    function test_startChallenge_reverts_targetNotListed() public {
         _fillBoard(100e18);
-        for (uint256 i = 1; i <= 8; i++) {
-            router.exposedRecordV4Win(TOKEN_A, TOKEN_B, 500, 10, address(uint160(i * 1000)));
-        }
-        address challenger = address(uint160(9000));
-        _mockPool(challenger, 1000e18);
-        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger);
-        vm.warp(block.timestamp + CHALLENGE_DELAY);
-        assertFalse(
-            router.finalizeV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger),
-            "A fully shielded board cannot be evicted from"
-        );
+        _rollPastCooldown();
+        _mockPool(address(uint160(9000)), 1000e18);
+        vm.expectRevert(V4PoolRegistry.TargetNotListed.selector);
+        _start(address(uint160(9000)), address(uint160(7777)));
     }
 
-    function test_challenge_perConfigKeying_concurrentChallengersAllowed() public {
+    function test_startChallenge_reverts_zeroLiquidityChallenger() public {
         _fillBoard(100e18);
+        _rollPastCooldown();
+        _mockPool(address(uint160(9000)), 0);
+        vm.expectRevert(V4PoolRegistry.PoolHasNoLiquidity.selector);
+        _start(address(uint160(9000)), address(uint160(3000)));
+    }
+
+    function test_startChallenge_reverts_nonExistentChallenger() public {
+        _fillBoard(100e18);
+        _rollPastCooldown();
+        PoolKey memory key = _makeKey(TOKEN_A, TOKEN_B, 500, 10, address(uint160(9000)));
+        _mockSlot0(PoolId.unwrap(key.toId()), 0);
+        vm.expectRevert(V4PoolRegistry.PoolDoesNotExist.selector);
+        _start(address(uint160(9000)), address(uint160(3000)));
+    }
+
+    function test_startChallenge_reverts_freshRegistrantInCooldown() public {
+        // Filling the board just stamped every slot's membership cooldown
+        _fillBoard(100e18);
+        _mockPool(address(uint160(9000)), 1000e18);
+        vm.expectRevert(V4PoolRegistry.SlotInCooldown.selector);
+        _start(address(uint160(9000)), address(uint160(3000)));
+
+        // At exactly cooldownUntil the slot becomes contestable
+        vm.warp(block.timestamp + SLOT_COOLDOWN);
+        _start(address(uint160(9000)), address(uint160(3000)));
+    }
+
+    function test_startChallenge_reverts_pendingRedeclaration() public {
+        _fillBoard(100e18);
+        _rollPastCooldown();
         address challengerOne = address(uint160(9000));
         _mockPool(challengerOne, 1000e18);
-        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challengerOne);
+        _start(challengerOne, address(uint160(3000)));
 
-        // A different challenger runs concurrently: one bogus challenge cannot occupy
-        // a per-pair slot and freeze eviction (the griefing DoS the keying prevents)
+        // A different challenger runs concurrently, even against the same target: one
+        // bogus challenge cannot occupy a per-pair slot and freeze eviction
         address challengerTwo = address(uint160(9100));
         _mockPool(challengerTwo, 1000e18);
-        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challengerTwo);
+        _start(challengerTwo, address(uint160(3000)));
 
-        // Re-declaring the SAME challenge cannot reset its clock while it is live
+        // Re-declaring the SAME challenge cannot reset its clock or its recorded mins
         vm.expectRevert(V4PoolRegistry.ChallengePending.selector);
-        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challengerOne);
+        _start(challengerOne, address(uint160(3000)));
 
         // Past expiry the same config can start fresh
         vm.warp(block.timestamp + CHALLENGE_EXPIRY + 1);
-        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challengerOne);
-    }
-
-    function test_challenge_finalizesAtExactExpiryBoundary() public {
-        _fillBoard(100e18);
-        _mockLiquidityFor(address(uint160(3000)), 5e18);
-        address challenger = address(uint160(9000));
-        _mockPool(challenger, 1000e18);
-        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger);
-
-        // Exactly at EXPIRY the challenge is still valid and must evict
-        vm.warp(block.timestamp + CHALLENGE_EXPIRY);
-        assertTrue(
-            router.finalizeV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger),
-            "Finalize at exactly the expiry boundary must still succeed"
-        );
-    }
-
-    function test_challenge_previousEpochWin_stillShields() public {
-        _fillBoard(100e18);
-        _mockLiquidityFor(address(uint160(3000)), 5e18);
-        _mockLiquidityFor(address(uint160(5000)), 50e18);
-        router.exposedRecordV4Win(TOKEN_A, TOKEN_B, 500, 10, address(uint160(3000)));
-
-        // Roll into the NEXT epoch: a previous-epoch win must still shield
-        vm.warp((block.timestamp / 1 weeks + 1) * 1 weeks + 1 hours);
-        address challenger = address(uint160(9000));
-        _mockPool(challenger, 1000e18);
-        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger);
-        vm.warp(block.timestamp + CHALLENGE_DELAY);
-        assertTrue(router.finalizeV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger));
-
-        // Shielded previous-epoch winner survived; unshielded #5 was evicted
-        vm.expectRevert(V4PoolRegistry.DuplicatePool.selector);
-        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, address(uint160(3000)));
-        _mockPool(address(uint160(5000)), 10e18);
-        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, address(uint160(5000)));
-    }
-
-    function test_challenge_expired_finalizesAsFailure() public {
-        _fillBoard(100e18);
-        address challenger = address(uint160(9000));
-        _mockPool(challenger, 1000e18);
-        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger);
-
-        vm.warp(block.timestamp + CHALLENGE_EXPIRY + 1);
-        assertFalse(
-            router.finalizeV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger), "Expired challenge must fail, not evict"
-        );
-    }
-
-    function test_challenge_concurrentFinalize_strongerChallengerCanEvictFreshListing() public {
-        _fillBoard(100e18);
-        _mockLiquidityFor(address(uint160(3000)), 5e18);
-        _mockLiquidityFor(address(uint160(5000)), 6e18);
-
-        address weaker = address(uint160(9000));
-        address stronger = address(uint160(9100));
-        _mockPool(weaker, 500e18);
-        _mockPool(stronger, 1000e18);
-        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, weaker);
-        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, stronger);
-
-        vm.warp(block.timestamp + CHALLENGE_DELAY);
-        assertTrue(router.finalizeV4Challenge(TOKEN_A, TOKEN_B, 500, 10, weaker), "First finalize evicts weakest");
-        // Documented behavior: the freshly listed challenger has no win stamp, so a
-        // stronger concurrent challenger may evict it in turn; capital-ranked outcome
-        assertTrue(router.finalizeV4Challenge(TOKEN_A, TOKEN_B, 500, 10, stronger), "Second finalize also lands");
-
-        // The stronger challenger is now listed (duplicate start reverts)
-        vm.expectRevert(V4PoolRegistry.DuplicatePool.selector);
-        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, stronger);
+        _start(challengerOne, address(uint160(3000)));
     }
 
     function test_startChallenge_blockedAtExactExpiryBoundary() public {
         _fillBoard(100e18);
+        _rollPastCooldown();
         address challenger = address(uint160(9000));
         _mockPool(challenger, 1000e18);
-        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger);
+        _start(challenger, address(uint160(3000)));
 
         // Inclusive boundary: at exactly startedAt + EXPIRY the challenge still occupies
         // its key and re-declaring must revert
         vm.warp(block.timestamp + CHALLENGE_EXPIRY);
         vm.expectRevert(V4PoolRegistry.ChallengePending.selector);
-        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger);
+        _start(challenger, address(uint160(3000)));
     }
 
-    function test_startChallenge_reverts_zeroLiquidityChallenger() public {
+    // ======== Challenge lifecycle ========
+
+    function test_challenge_fullFlow_evictsNamedTarget() public {
         _fillBoard(100e18);
+        _rollPastCooldown();
+        address target = address(uint160(3000));
+        _mockLiquidityFor(target, 5e18);
+
         address challenger = address(uint160(9000));
-        _mockPool(challenger, 0);
-        vm.expectRevert(V4PoolRegistry.ChallengerHasNoLiquidity.selector);
-        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challenger);
+        _mockPool(challenger, 1000e18);
+        _start(challenger, target);
+
+        vm.warp(block.timestamp + CHALLENGE_DELAY);
+        assertTrue(_finalize(challenger), "Challenger with strictly higher min must evict the named target");
+
+        // The challenger now holds the slot: re-using it as a challenger config hits the
+        // duplicate check
+        vm.expectRevert(V4PoolRegistry.DuplicatePool.selector);
+        _start(challenger, address(uint160(1000)));
+
+        // The evicted target is gone (it passes the duplicate check as a challenger) and
+        // the winner's slot is protected by the membership cooldown
+        _mockPool(target, 10e18);
+        vm.expectRevert(V4PoolRegistry.SlotInCooldown.selector);
+        _start(target, challenger);
+    }
+
+    function test_challenge_reverts_beforeDelay() public {
+        _fillBoard(100e18);
+        _rollPastCooldown();
+        address challenger = address(uint160(9000));
+        _mockPool(challenger, 1000e18);
+        _start(challenger, address(uint160(3000)));
+
+        vm.warp(block.timestamp + CHALLENGE_DELAY - 1);
+        vm.expectRevert(V4PoolRegistry.ChallengeNotReady.selector);
+        _finalize(challenger);
+    }
+
+    function test_challenge_reverts_noChallenge() public {
+        vm.expectRevert(V4PoolRegistry.NoChallenge.selector);
+        _finalize(address(uint160(9000)));
+    }
+
+    function test_challenge_tie_keepsIncumbent() public {
+        _fillBoard(100e18);
+        _rollPastCooldown();
+        address challenger = address(uint160(9000));
+        _mockPool(challenger, 100e18); // exactly equal to the target's liquidity
+        _start(challenger, address(uint160(3000)));
+
+        vm.warp(block.timestamp + CHALLENGE_DELAY);
+        assertFalse(_finalize(challenger), "Equal mins must keep the incumbent (strict inequality)");
+    }
+
+    function test_challenge_jitChallenger_cannotWin() public {
+        _fillBoard(100e18);
+        _rollPastCooldown();
+        address target = address(uint160(3000));
+        address challenger = address(uint160(9000));
+        _mockPool(challenger, 1000e18); // JIT capital parked at declaration
+        _start(challenger, target);
+
+        // Capital leaves mid-window; anyone pokes and pins the challenger's min at 1
+        vm.warp(block.timestamp + 12 hours);
+        _mockLiquidityFor(challenger, 1);
+        vm.expectEmit(true, false, false, true);
+        emit V4ChallengePoked(_pairHash(), 500, 10, challenger, 1, 100e18);
+        _poke(challenger);
+
+        // JIT re-add right before finalization cannot raise the recorded min
+        _mockLiquidityFor(challenger, 1000e18);
+        vm.warp(block.timestamp + CHALLENGE_DELAY);
+        assertFalse(_finalize(challenger), "Flash/JIT liquidity at finalize must not win");
+
+        // The target survived and is immediately re-challengeable (failed challenges
+        // stamp no cooldown)
+        _mockPool(address(uint160(9100)), 1000e18);
+        _start(address(uint160(9100)), target);
+    }
+
+    function test_challenge_lateDefense_cannotHelp() public {
+        _fillBoard(100e18);
+        _rollPastCooldown();
+        address target = address(uint160(3000));
+        address challenger = address(uint160(9000));
+        _mockPool(challenger, 50e18);
+        _start(challenger, target);
+
+        // The target's LPs leave mid-window; a poke pins its min at 1
+        vm.warp(block.timestamp + 12 hours);
+        _mockLiquidityFor(target, 1);
+        vm.expectEmit(true, false, false, true);
+        emit V4ChallengePoked(_pairHash(), 500, 10, challenger, 50e18, 1);
+        _poke(challenger);
+
+        // Front-running finalize with a big deposit is pointless: the min stands
+        _mockLiquidityFor(target, 500e18);
+        vm.warp(block.timestamp + CHALLENGE_DELAY);
+        assertTrue(_finalize(challenger), "Liquidity added after a low poke must not save the target");
+    }
+
+    function test_poke_cannotRaiseMin() public {
+        _fillBoard(100e18);
+        _rollPastCooldown();
+        address challenger = address(uint160(9000));
+        _mockPool(challenger, 1); // 1-wei challenger: min pinned at declaration
+        _start(challenger, address(uint160(3000)));
+
+        // Pumping liquidity and poking must NOT raise the stored min
+        _mockLiquidityFor(challenger, 1000e18);
+        vm.expectEmit(true, false, false, true);
+        emit V4ChallengePoked(_pairHash(), 500, 10, challenger, 1, 100e18);
+        _poke(challenger);
+
+        vm.warp(block.timestamp + CHALLENGE_DELAY);
+        assertFalse(_finalize(challenger), "A min can never be raised by a poke");
+    }
+
+    function test_poke_reverts_noChallenge() public {
+        vm.expectRevert(V4PoolRegistry.NoChallenge.selector);
+        _poke(address(uint160(9000)));
+    }
+
+    function test_poke_expiryBoundary() public {
+        _fillBoard(100e18);
+        _rollPastCooldown();
+        address challenger = address(uint160(9000));
+        _mockPool(challenger, 1000e18);
+        _start(challenger, address(uint160(3000)));
+
+        // Valid at exactly startedAt + EXPIRY...
+        vm.warp(block.timestamp + CHALLENGE_EXPIRY);
+        _poke(challenger);
+
+        // ...and expired one second later
+        vm.warp(block.timestamp + 1);
+        vm.expectRevert(V4PoolRegistry.ChallengeExpired.selector);
+        _poke(challenger);
+    }
+
+    function test_challenge_expired_finalizesAsFailure() public {
+        _fillBoard(100e18);
+        _rollPastCooldown();
+        address target = address(uint160(3000));
+        _mockLiquidityFor(target, 5e18);
+        address challenger = address(uint160(9000));
+        _mockPool(challenger, 1000e18);
+        _start(challenger, target);
+
+        vm.warp(block.timestamp + CHALLENGE_EXPIRY + 1);
+        assertFalse(_finalize(challenger), "Expired challenge must fail, not evict");
+
+        // The target kept its slot: challenging it again works immediately
+        _mockPool(address(uint160(9100)), 1000e18);
+        _start(address(uint160(9100)), target);
+    }
+
+    function test_challenge_finalizesAtExactExpiryBoundary() public {
+        _fillBoard(100e18);
+        _rollPastCooldown();
+        address target = address(uint160(3000));
+        _mockLiquidityFor(target, 5e18);
+        address challenger = address(uint160(9000));
+        _mockPool(challenger, 1000e18);
+        _start(challenger, target);
+
+        // Exactly at EXPIRY the challenge is still valid and must evict
+        vm.warp(block.timestamp + CHALLENGE_EXPIRY);
+        assertTrue(_finalize(challenger), "Finalize at exactly the expiry boundary must still succeed");
+    }
+
+    function test_challenge_voidWhenTargetAlreadyEvicted() public {
+        _fillBoard(100e18);
+        _rollPastCooldown();
+        address target = address(uint160(3000));
+        _mockLiquidityFor(target, 5e18);
+
+        // Two concurrent challengers name the SAME target
+        address first = address(uint160(9000));
+        address second = address(uint160(9100));
+        _mockPool(first, 1000e18);
+        _mockPool(second, 2000e18);
+        _start(first, target);
+        _start(second, target);
+
+        vm.warp(block.timestamp + CHALLENGE_DELAY);
+        assertTrue(_finalize(first), "First finalized eviction wins the slot");
+        assertFalse(_finalize(second), "Later challenge against the departed target is void");
+
+        // The void challenger was NOT listed: it can immediately declare a fresh
+        // challenge (against a slot that is out of cooldown)
+        _start(second, address(uint160(5000)));
+    }
+
+    function test_challenge_failed_targetImmediatelyRechallengeable() public {
+        _fillBoard(100e18);
+        _rollPastCooldown();
+        address target = address(uint160(3000));
+        address challenger = address(uint160(9000));
+        _mockPool(challenger, 1e18); // far below the target's 100e18
+        _start(challenger, target);
+
+        vm.warp(block.timestamp + CHALLENGE_DELAY);
+        assertFalse(_finalize(challenger), "Underweight challenger must lose");
+
+        // Deliberately NO cooldown after a failed challenge: otherwise an incumbent
+        // could self-challenge with a dust pool, lose on purpose, and repeat for
+        // permanent immunity. Same challenger, same target, immediately: allowed.
+        _mockLiquidityFor(challenger, 1000e18);
+        _start(challenger, target);
+        vm.warp(block.timestamp + CHALLENGE_DELAY);
+        assertTrue(_finalize(challenger), "Failed challenge must leave the target immediately contestable");
+    }
+
+    function test_challenge_evictionWinnerProtectedForCooldown() public {
+        _fillBoard(100e18);
+        _rollPastCooldown();
+        address target = address(uint160(3000));
+        _mockLiquidityFor(target, 5e18);
+        address challenger = address(uint160(9000));
+        _mockPool(challenger, 1000e18);
+        _start(challenger, target);
+        vm.warp(block.timestamp + CHALLENGE_DELAY);
+        assertTrue(_finalize(challenger));
+
+        // Fresh eviction winner cannot be named as a target until its cooldown lapses
+        address next = address(uint160(9100));
+        _mockPool(next, 2000e18);
+        vm.expectRevert(V4PoolRegistry.SlotInCooldown.selector);
+        _start(next, challenger);
+
+        vm.warp(block.timestamp + SLOT_COOLDOWN);
+        _start(next, challenger);
     }
 
     // ======== Helpers ========
+
+    function _start(address challengerHooks, address targetHooks) internal {
+        router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challengerHooks, 500, 10, targetHooks);
+    }
+
+    function _poke(address challengerHooks) internal {
+        router.pokeV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challengerHooks);
+    }
+
+    function _finalize(address challengerHooks) internal returns (bool) {
+        return router.finalizeV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challengerHooks);
+    }
 
     function _fillBoard(uint128 liquidityEach) internal {
         for (uint256 i = 1; i <= 8; i++) {
@@ -552,6 +717,16 @@ contract V4LeaderboardTest is Test {
             _mockPool(hooks, liquidityEach);
             router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, hooks);
         }
+    }
+
+    /// @dev Registration stamps every slot's membership cooldown; most challenge tests
+    /// want a settled board, so roll time past it
+    function _rollPastCooldown() internal {
+        vm.warp(block.timestamp + SLOT_COOLDOWN + 1);
+    }
+
+    function _pairHash() internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(TOKEN_A, TOKEN_B));
     }
 
     function _mockPool(address hooks, uint128 liquidity) internal {
