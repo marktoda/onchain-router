@@ -115,10 +115,10 @@ contract QuoteSwapParityMainnetTest is MainnetForkFixture {
 }
 
 /// @notice V4 parity on a Base fork against live discovered pools.
-/// @dev Scope: hookless pools with zero protocol fee. Hooked pools may legitimately
-/// diverge (the quoter is hook-unaware by design) and a nonzero protocol fee is a KNOWN
-/// quoter gap (V4QuoterMath passes only key.fee to computeSwapStep); pools where either
-/// applies are skipped here and must be addressed before the parity gate is complete.
+/// @dev Scope: hookless pools. Hooked pools may legitimately diverge (the quoter is
+/// hook-unaware by design). Protocol fees are no longer a quoter gap: V4QuoterMath
+/// composes the effective swap fee from slot0's directional protocol fee and live LP
+/// fee, and QuoteSwapParityV4ProtocolFeeTest below asserts parity on a fee-charging pool.
 contract QuoteSwapParityV4BaseTest is BaseForkFixture {
     OnchainRouterExposed router;
 
@@ -206,13 +206,15 @@ contract QuoteSwapParityV4ProtocolFeeTest is BaseForkFixture {
             }
         }
 
-        if (poolFound) {
-            // Asymmetric protocol fee (0.07% oneForZero / 0.03% zeroForOne, max 0.1% per
-            // direction) so the two directional fee getters must diverge
-            uint24 protocolFee = (uint24(700) << 12) | uint24(300);
-            vm.prank(pm.protocolFeeController());
-            pm.setProtocolFee(poolKey, protocolFee);
-        }
+        // Fail loud on fixture drift: a silent skip here would turn the whole F8
+        // regression suite green without asserting anything
+        require(poolFound, "F8 fixture drift: no liquid hookless (W)ETH/USDC pool at pinned block; update the probe");
+
+        // Asymmetric protocol fee (0.07% oneForZero / 0.03% zeroForOne, max 0.1% per
+        // direction) so the two directional fee getters must diverge
+        uint24 protocolFee = (uint24(700) << 12) | uint24(300);
+        vm.prank(pm.protocolFeeController());
+        pm.setProtocolFee(poolKey, protocolFee);
     }
 
     function _makeKey(address tokenA, address tokenB, uint24 fee, int24 tickSpacing)
@@ -236,7 +238,6 @@ contract QuoteSwapParityV4ProtocolFeeTest is BaseForkFixture {
 
     /// forge-config: default.fuzz.runs = 24
     function testFuzz_parity_v4_protocolFee_exactIn(uint256 amountIn) public {
-        vm.skip(!poolFound);
         amountIn = bound(amountIn, 0.0001 ether, 20 ether);
 
         (Quote memory quote, uint256 quoted) = _poolQuote(amountIn);
@@ -250,8 +251,6 @@ contract QuoteSwapParityV4ProtocolFeeTest is BaseForkFixture {
     /// @notice Exact-out through the protocol-fee pool: covers the fee composition on
     /// the exact-output quote path
     function test_parity_v4_protocolFee_exactOut() public {
-        vm.skip(!poolFound);
-
         uint256 amountOut = 1_000e6;
         Pool[] memory path = new Pool[](1);
         path[0] =
@@ -268,8 +267,6 @@ contract QuoteSwapParityV4ProtocolFeeTest is BaseForkFixture {
     /// @notice The reverse direction (USDC in): exercises getOneForZeroFee, which differs
     /// from the zeroForOne fee because the configured protocol fee is asymmetric
     function test_parity_v4_protocolFee_oneForZero() public {
-        vm.skip(!poolFound);
-
         _dealUSDC(address(this), 10_000e6);
         ERC20(USDC).approve(address(router), type(uint256).max);
 
@@ -285,7 +282,6 @@ contract QuoteSwapParityV4ProtocolFeeTest is BaseForkFixture {
     }
 
     function test_parity_v4_protocolFee_singleShot() public {
-        vm.skip(!poolFound);
         (Quote memory quote, uint256 quoted) = _poolQuote(0.05 ether);
         assertGt(quoted, 0, "Probed pool must produce a usable quote");
 
