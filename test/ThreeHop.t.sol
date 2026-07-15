@@ -128,6 +128,58 @@ contract ThreeHopTest is MainnetForkFixture {
         );
     }
 
+    // ======== Reverse-ordered intermediate pair ========
+
+    /// @dev Fresh endpoints C and D whose ONLY connecting chain is C -> Y -> X -> D:
+    /// C pairs only with Y, D pairs only with X, and X <-> Y already exists from setUp.
+    /// The winning 3-hop must therefore fold the intermediates in REVERSE registration
+    /// order (Y = intermediateTokens[1] before X = intermediateTokens[0]), the pair
+    /// ordering no forward-chain (A -> X -> Y -> B) test exercises.
+    function _seedReverseChain() internal returns (MockERC20 tokenC, MockERC20 tokenD) {
+        tokenC = new MockERC20("TokenC", "TKC", 18);
+        tokenD = new MockERC20("TokenD", "TKD", 18);
+        _createPool(address(tokenC), address(tokenY));
+        _createPool(address(tokenX), address(tokenD));
+    }
+
+    function test_threeHop_reverseOrderedPair_winsExactIn() public {
+        (MockERC20 tokenC, MockERC20 tokenD) = _seedReverseChain();
+
+        SwapParams memory params =
+            SwapParams({amountSpecified: 100e18, tokenIn: address(tokenC), tokenOut: address(tokenD)});
+
+        Quote memory twoHop = router.routeExactInput(params);
+        assertEq(twoHop.amountOut, 0, "Pair must be unroutable at 2 hops (test precondition)");
+
+        Quote memory quote = router.routeExactInput3Hop(params);
+        assertGt(quote.amountOut, 0, "3-hop search must find the reverse-ordered chain");
+        assertEq(quote.path.length, 3, "Route must be 3 hops");
+        assertEq(quote.path[0].tokenOut, address(tokenY), "First hop must enter later-registered Y");
+        assertEq(quote.path[1].tokenOut, address(tokenX), "Second hop must cross to earlier-registered X");
+        assertEq(quote.path[2].tokenOut, address(tokenD));
+    }
+
+    function test_threeHop_reverseOrderedPair_winsExactOut() public {
+        (MockERC20 tokenC, MockERC20 tokenD) = _seedReverseChain();
+
+        SwapParams memory params =
+            SwapParams({amountSpecified: 50e18, tokenIn: address(tokenC), tokenOut: address(tokenD)});
+
+        Quote memory twoHop = router.routeExactOutput(params);
+        assertTrue(
+            twoHop.amountIn == 0 || twoHop.amountIn == type(uint256).max,
+            "Pair must be unroutable at 2 hops (test precondition)"
+        );
+
+        Quote memory quote = router.routeExactOutput3Hop(params);
+        assertGt(quote.amountIn, 0, "3-hop search must price the reverse-ordered chain");
+        assertTrue(quote.amountIn != type(uint256).max, "Quote must be real, not the unfillable sentinel");
+        assertEq(quote.path.length, 3, "Route must be 3 hops");
+        assertEq(quote.path[0].tokenOut, address(tokenY), "First hop must enter later-registered Y");
+        assertEq(quote.path[1].tokenOut, address(tokenX), "Second hop must cross to earlier-registered X");
+        assertEq(quote.path[2].tokenOut, address(tokenD));
+    }
+
     // ======== Execution: the executor is N-hop agnostic ========
 
     function test_threeHop_exactIn_executesWithParity() public {
