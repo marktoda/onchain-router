@@ -35,7 +35,7 @@ abstract contract V4Quoter is OnchainRouterImmutables {
         V4QuoterMath.QuoteParams memory quoteParams = V4QuoterMath.QuoteParams({
             zeroForOne: zeroForOne,
             exactInput: true,
-            fee: key.fee,
+            fee: 0, // placeholder: V4QuoterMath composes the effective fee from slot0 (protocol fee + LP fee)
             sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
         });
 
@@ -60,7 +60,7 @@ abstract contract V4Quoter is OnchainRouterImmutables {
         V4QuoterMath.QuoteParams memory quoteParams = V4QuoterMath.QuoteParams({
             zeroForOne: zeroForOne,
             exactInput: false,
-            fee: key.fee,
+            fee: 0, // placeholder: V4QuoterMath composes the effective fee from slot0 (protocol fee + LP fee)
             sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
         });
 
