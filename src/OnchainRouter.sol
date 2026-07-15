@@ -78,6 +78,13 @@ contract OnchainRouter is
     }
 
     /// @notice Register a routing intermediate for 2-hop path search.
+    /// @dev WARNING: do not add fee-on-transfer or rebasing tokens. Exact-delivery
+    /// enforcement (_fundInput) covers only the caller's input token at funding time;
+    /// amounts moving through a mid-route intermediate are assumed to arrive in full, so
+    /// an intermediate that delivers short desynchronizes the second hop's accounting.
+    /// Swaps quoted through such an intermediate revert mid-execution (or, under a loose
+    /// slippage bound, settle with wrong accounting), disabling every route that quotes
+    /// best through it until the token is removed from the set.
     function addIntermediateToken(address token) external onlyOwner {
         if (token == address(0)) revert InvalidIntermediate();
         uint256 length = intermediateTokens.length;
