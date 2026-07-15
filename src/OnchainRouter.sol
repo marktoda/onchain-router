@@ -303,7 +303,11 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter,
 
         Quote memory multi = routeExactOutputMulti(params, intermediateToken);
         Quote memory single = routeExactOutputSingle(params);
-        return multi.better(single);
+        bestQuote = multi.better(single);
+        // Normalize an unroutable result: better() can surface the internal uint256.max
+        // "unfillable" sentinel as {amountIn: max}. Callers should see a clean empty quote
+        // (amountIn 0, empty path) for an unroutable pair, not the sentinel.
+        if (bestQuote.amountIn == type(uint256).max) bestQuote.amountIn = 0;
     }
 
     function routeExactInputMulti(SwapParams memory params, address intermediate)
