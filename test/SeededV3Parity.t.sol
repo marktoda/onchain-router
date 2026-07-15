@@ -100,7 +100,9 @@ contract SeededV3ParityTest is MainnetForkFixture {
         SwapParams memory params =
             SwapParams({amountSpecified: amountOut, tokenIn: address(token18), tokenOut: address(token6)});
         Quote memory quote = router.routeExactOutput(params);
-        // Partial fills beyond pool depth are rejected by the executor; separate behavior
+        // Beyond pool depth the quoter's full-fill check surfaces the uint256.max
+        // unfillable sentinel; this assume filters those so only fully-fillable quotes
+        // reach the parity assertion below.
         vm.assume(quote.amountIn > 0 && quote.amountIn < 1_000_000e18);
 
         uint256 amountIn = router.swapExactOutput(quote, recipient, block.timestamp, false);
@@ -126,5 +128,31 @@ contract SeededV3ParityTest is MainnetForkFixture {
         uint256 amountOut = router.swapExactInput(quote, recipient, block.timestamp, false);
         assertEq(amountOut, quote.amountOut, "seeded V3 reverse exact-in: realized output must equal quote bit-for-bit");
         assertEq(ERC20(address(token18)).balanceOf(recipient), amountOut, "recipient must hold the output");
+    }
+
+    /// @notice Reverse direction (token6 -> token18) exact-out, mirroring
+    /// testFuzz_seededV3Parity_exactOut on the opposite swap direction.
+    /// @dev The pool is priced 1:1 in raw units, so the raw output bound (1e12) mirrors
+    /// the forward test's 1_000_000e6 and the raw input cap (1e24) mirrors 1_000_000e18.
+    /// forge-config: default.fuzz.runs = 128
+    function testFuzz_seededV3Parity_exactOut_reverse(uint256 amountOut, uint128 l1, uint128 l2, uint128 l3, uint128 l4)
+        public
+    {
+        (l1, l2, l3, l4) = _bounds(l1, l2, l3, l4);
+        _seedPositions(l1, l2, l3, l4);
+
+        amountOut = bound(amountOut, 1e3, 1e12);
+
+        SwapParams memory params =
+            SwapParams({amountSpecified: amountOut, tokenIn: address(token6), tokenOut: address(token18)});
+        Quote memory quote = router.routeExactOutput(params);
+        // Beyond pool depth the quoter's full-fill check surfaces the uint256.max
+        // unfillable sentinel; this assume filters those so only fully-fillable quotes
+        // reach the parity assertion below.
+        vm.assume(quote.amountIn > 0 && quote.amountIn < 1e24);
+
+        uint256 amountIn = router.swapExactOutput(quote, recipient, block.timestamp, false);
+        assertEq(amountIn, quote.amountIn, "seeded V3 reverse exact-out: realized input must equal quote bit-for-bit");
+        assertEq(ERC20(address(token18)).balanceOf(recipient), amountOut, "recipient must receive the exact output");
     }
 }
