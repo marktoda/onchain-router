@@ -46,7 +46,9 @@ contract MultihopSentinelTest is BaseForkFixture {
         _forkBase(32_000_000);
         manager = IPoolManager(POOL_MANAGER);
         lpRouter = new PoolModifyLiquidityTest(manager);
-        router = new OnchainRouterExposed(address(new MHV2Factory()), address(new MHV3Factory()), POOL_MANAGER, WETH);
+        router = new OnchainRouterExposed(
+            address(new MHV2Factory()), address(new MHV3Factory()), POOL_MANAGER, WETH, address(this)
+        );
 
         tokenIn = new MockERC20("IN", "IN", 18);
         mid = new MockERC20("MID", "MID", 18);
