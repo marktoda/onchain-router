@@ -52,6 +52,20 @@ abstract contract V4PoolRegistry is OnchainRouterImmutables {
         uint128 targetMin;
     }
 
+    /// @dev In-memory bundle of a challenge's identifying configs. Exists purely to keep
+    /// stack depth inside the challenge functions below legacy codegen's limit (this
+    /// project builds without via-IR); it is never stored.
+    struct V4ChallengeRef {
+        address tokenA;
+        address tokenB;
+        uint24 challengerFee;
+        int24 challengerTickSpacing;
+        address challengerHooks;
+        uint24 targetFee;
+        int24 targetTickSpacing;
+        address targetHooks;
+    }
+
     uint8 constant MAX_V4_POOLS_PER_PAIR = 8;
     uint256 internal constant CHALLENGE_DELAY = 1 days;
     uint256 internal constant CHALLENGE_EXPIRY = 3 days;
@@ -165,48 +179,80 @@ abstract contract V4PoolRegistry is OnchainRouterImmutables {
         int24 targetTickSpacing,
         address targetHooks
     ) external {
-        bytes32 ph = _pairHash(tokenA, tokenB);
+        // Bundled into a memory struct immediately: the flat 8-arg parameter list plus
+        // working locals exceeds legacy codegen's stack budget (no via-IR in this build)
+        _startV4Challenge(
+            V4ChallengeRef({
+                tokenA: tokenA,
+                tokenB: tokenB,
+                challengerFee: challengerFee,
+                challengerTickSpacing: challengerTickSpacing,
+                challengerHooks: challengerHooks,
+                targetFee: targetFee,
+                targetTickSpacing: targetTickSpacing,
+                targetHooks: targetHooks
+            })
+        );
+    }
+
+    function _startV4Challenge(V4ChallengeRef memory c) private {
+        bytes32 ph = _pairHash(c.tokenA, c.tokenB);
         V4PoolEntry[] storage entries = v4Leaderboard[ph];
         if (entries.length < MAX_V4_POOLS_PER_PAIR) revert BoardNotFull(); // not full: register directly
-        _checkNotListed(entries, challengerFee, challengerTickSpacing, challengerHooks);
-        if (challengerHooks == address(0) && _isDefaultConfig(challengerFee, challengerTickSpacing)) {
+        _checkNotListed(entries, c.challengerFee, c.challengerTickSpacing, c.challengerHooks);
+        if (c.challengerHooks == address(0) && _isDefaultConfig(c.challengerFee, c.challengerTickSpacing)) {
             revert DefaultConfigNotAllowed();
         }
 
-        (bool listed, uint256 targetIdx) = _findEntry(entries, targetFee, targetTickSpacing, targetHooks);
-        if (!listed) revert TargetNotListed();
-        if (block.timestamp < entries[targetIdx].cooldownUntil) revert SlotInCooldown();
+        {
+            (bool listed, uint256 targetIdx) = _findEntry(entries, c.targetFee, c.targetTickSpacing, c.targetHooks);
+            if (!listed) revert TargetNotListed();
+            if (block.timestamp < entries[targetIdx].cooldownUntil) revert SlotInCooldown();
+        }
 
         // Re-declaring the same challenge would reset its clock and mins; block until it expires
-        bytes32 challengeId = _challengeId(ph, challengerFee, challengerTickSpacing, challengerHooks);
-        uint64 existing = v4Challenges[challengeId].startedAt;
-        if (existing != 0 && block.timestamp <= existing + CHALLENGE_EXPIRY) revert ChallengePending();
+        bytes32 challengeId = _challengeId(ph, c.challengerFee, c.challengerTickSpacing, c.challengerHooks);
+        {
+            uint64 existing = v4Challenges[challengeId].startedAt;
+            if (existing != 0 && block.timestamp <= existing + CHALLENGE_EXPIRY) revert ChallengePending();
+        }
 
-        PoolId challengerId = _buildPoolKey(tokenA, tokenB, challengerFee, challengerTickSpacing, challengerHooks).toId();
-        (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(challengerId);
-        if (sqrtPriceX96 == 0) revert PoolDoesNotExist();
-        uint128 challengerLiquidity = poolManager.getLiquidity(challengerId);
-        if (challengerLiquidity == 0) revert PoolHasNoLiquidity();
+        uint128 challengerLiquidity;
+        {
+            PoolId challengerId =
+                _buildPoolKey(c.tokenA, c.tokenB, c.challengerFee, c.challengerTickSpacing, c.challengerHooks).toId();
+            (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(challengerId);
+            if (sqrtPriceX96 == 0) revert PoolDoesNotExist();
+            challengerLiquidity = poolManager.getLiquidity(challengerId);
+            if (challengerLiquidity == 0) revert PoolHasNoLiquidity();
+        }
 
-        uint128 targetLiquidity =
-            poolManager.getLiquidity(_buildPoolKey(tokenA, tokenB, targetFee, targetTickSpacing, targetHooks).toId());
+        uint128 targetLiquidity = poolManager.getLiquidity(
+            _buildPoolKey(c.tokenA, c.tokenB, c.targetFee, c.targetTickSpacing, c.targetHooks).toId()
+        );
 
         v4Challenges[challengeId] = V4Challenge({
             startedAt: uint64(block.timestamp),
-            targetFee: targetFee,
-            targetTickSpacing: targetTickSpacing,
-            targetHooks: targetHooks,
+            targetFee: c.targetFee,
+            targetTickSpacing: c.targetTickSpacing,
+            targetHooks: c.targetHooks,
             challengerMin: challengerLiquidity,
             targetMin: targetLiquidity
         });
+        _emitChallengeStarted(ph, c);
+    }
+
+    /// @dev Separate function purely to keep the 8-field event's argument evaluation off
+    /// the caller's stack (legacy codegen)
+    function _emitChallengeStarted(bytes32 ph, V4ChallengeRef memory c) private {
         emit V4ChallengeStarted(
             ph,
-            challengerFee,
-            challengerTickSpacing,
-            challengerHooks,
-            targetFee,
-            targetTickSpacing,
-            targetHooks,
+            c.challengerFee,
+            c.challengerTickSpacing,
+            c.challengerHooks,
+            c.targetFee,
+            c.targetTickSpacing,
+            c.targetHooks,
             uint64(block.timestamp)
         );
     }
@@ -225,7 +271,8 @@ abstract contract V4PoolRegistry is OnchainRouterImmutables {
         if (startedAt == 0) revert NoChallenge();
         if (block.timestamp > startedAt + CHALLENGE_EXPIRY) revert ChallengeExpired();
 
-        (uint128 challengerMin, uint128 targetMin) = _sampleChallenge(challenge, tokenA, tokenB, fee, tickSpacing, hooks);
+        (uint128 challengerMin, uint128 targetMin) =
+            _sampleChallenge(challenge, _challengeRef(tokenA, tokenB, fee, tickSpacing, hooks, challenge));
         emit V4ChallengePoked(ph, fee, tickSpacing, hooks, challengerMin, targetMin);
     }
 
@@ -246,89 +293,99 @@ abstract contract V4PoolRegistry is OnchainRouterImmutables {
         bytes32 ph = _pairHash(tokenA, tokenB);
         bytes32 challengeId = _challengeId(ph, fee, tickSpacing, hooks);
         V4Challenge storage challenge = v4Challenges[challengeId];
-        uint64 startedAt = challenge.startedAt;
-        if (startedAt == 0) revert NoChallenge();
-        if (block.timestamp < startedAt + CHALLENGE_DELAY) revert ChallengeNotReady();
+        {
+            uint64 startedAt = challenge.startedAt;
+            if (startedAt == 0) revert NoChallenge();
+            if (block.timestamp < startedAt + CHALLENGE_DELAY) revert ChallengeNotReady();
 
-        if (block.timestamp > startedAt + CHALLENGE_EXPIRY) {
-            delete v4Challenges[challengeId];
-            emit V4ChallengeFinalized(ph, false);
-            return false;
+            if (block.timestamp > startedAt + CHALLENGE_EXPIRY) {
+                delete v4Challenges[challengeId];
+                emit V4ChallengeFinalized(ph, false);
+                return false;
+            }
         }
 
-        (uint128 challengerMin, uint128 targetMin) = _sampleChallenge(challenge, tokenA, tokenB, fee, tickSpacing, hooks);
-        (uint24 targetFee, int24 targetTickSpacing, address targetHooks) =
-            (challenge.targetFee, challenge.targetTickSpacing, challenge.targetHooks);
+        // Snapshot the target config into memory before the delete below
+        V4ChallengeRef memory c = _challengeRef(tokenA, tokenB, fee, tickSpacing, hooks, challenge);
+        (uint128 challengerMin, uint128 targetMin) = _sampleChallenge(challenge, c);
         delete v4Challenges[challengeId];
 
-        success = _executeEviction(
-            ph, fee, tickSpacing, hooks, targetFee, targetTickSpacing, targetHooks, challengerMin, targetMin
-        );
+        success = _executeEviction(ph, c, challengerMin, targetMin);
         emit V4ChallengeFinalized(ph, success);
     }
 
-    /// @dev Evict the named target and seat the challenger, if the min-scores allow it.
-    function _executeEviction(
-        bytes32 ph,
+    /// @dev Bundle a pending challenge's full identity (caller-supplied pair + challenger
+    /// config, stored target config) into a V4ChallengeRef.
+    function _challengeRef(
+        address tokenA,
+        address tokenB,
         uint24 fee,
         int24 tickSpacing,
         address hooks,
-        uint24 targetFee,
-        int24 targetTickSpacing,
-        address targetHooks,
-        uint128 challengerMin,
-        uint128 targetMin
-    ) private returns (bool) {
+        V4Challenge storage challenge
+    ) private view returns (V4ChallengeRef memory c) {
+        c.tokenA = tokenA;
+        c.tokenB = tokenB;
+        c.challengerFee = fee;
+        c.challengerTickSpacing = tickSpacing;
+        c.challengerHooks = hooks;
+        c.targetFee = challenge.targetFee;
+        c.targetTickSpacing = challenge.targetTickSpacing;
+        c.targetHooks = challenge.targetHooks;
+    }
+
+    /// @dev Evict the named target and seat the challenger, if the min-scores allow it.
+    function _executeEviction(bytes32 ph, V4ChallengeRef memory c, uint128 challengerMin, uint128 targetMin)
+        private
+        returns (bool)
+    {
         V4PoolEntry[] storage entries = v4Leaderboard[ph];
 
         // Void if the named target already lost its slot to a concurrently finalized
         // challenge (first eviction wins). Also void, defensively, if the challenger
         // is somehow already listed: the board must never hold duplicates.
-        (bool targetListed, uint256 targetIdx) = _findEntry(entries, targetFee, targetTickSpacing, targetHooks);
+        (bool targetListed, uint256 targetIdx) = _findEntry(entries, c.targetFee, c.targetTickSpacing, c.targetHooks);
         if (!targetListed) return false;
-        (bool challengerListed,) = _findEntry(entries, fee, tickSpacing, hooks);
+        (bool challengerListed,) = _findEntry(entries, c.challengerFee, c.challengerTickSpacing, c.challengerHooks);
         if (challengerListed) return false;
 
         // Strict inequality: a tie keeps the incumbent
         if (challengerMin <= targetMin) return false;
 
-        emit V4PoolEvicted(ph, targetFee, targetTickSpacing, targetHooks);
+        emit V4PoolEvicted(ph, c.targetFee, c.targetTickSpacing, c.targetHooks);
         entries[targetIdx] = V4PoolEntry({
-            fee: fee,
-            tickSpacing: tickSpacing,
-            hooks: hooks,
+            fee: c.challengerFee,
+            tickSpacing: c.challengerTickSpacing,
+            hooks: c.challengerHooks,
             cooldownUntil: uint64(block.timestamp + SLOT_COOLDOWN)
         });
-        emit V4PoolRegistered(ph, fee, tickSpacing, hooks);
+        emit V4PoolRegistered(ph, c.challengerFee, c.challengerTickSpacing, c.challengerHooks);
         return true;
     }
 
     /// @dev Sample the current active liquidity of both sides of a challenge and fold
     /// each into its stored running minimum (min-update only; a sample can never raise
     /// a score). Returns the updated mins.
-    function _sampleChallenge(
-        V4Challenge storage challenge,
-        address tokenA,
-        address tokenB,
-        uint24 fee,
-        int24 tickSpacing,
-        address hooks
-    ) private returns (uint128 challengerMin, uint128 targetMin) {
-        uint128 challengerLiquidity =
-            poolManager.getLiquidity(_buildPoolKey(tokenA, tokenB, fee, tickSpacing, hooks).toId());
+    function _sampleChallenge(V4Challenge storage challenge, V4ChallengeRef memory c)
+        private
+        returns (uint128 challengerMin, uint128 targetMin)
+    {
+        uint128 sample = poolManager.getLiquidity(
+            _buildPoolKey(c.tokenA, c.tokenB, c.challengerFee, c.challengerTickSpacing, c.challengerHooks).toId()
+        );
         challengerMin = challenge.challengerMin;
-        if (challengerLiquidity < challengerMin) {
-            challengerMin = challengerLiquidity;
-            challenge.challengerMin = challengerLiquidity;
+        if (sample < challengerMin) {
+            challengerMin = sample;
+            challenge.challengerMin = sample;
         }
 
-        uint128 targetLiquidity = poolManager.getLiquidity(
-            _buildPoolKey(tokenA, tokenB, challenge.targetFee, challenge.targetTickSpacing, challenge.targetHooks).toId()
+        sample = poolManager.getLiquidity(
+            _buildPoolKey(c.tokenA, c.tokenB, c.targetFee, c.targetTickSpacing, c.targetHooks).toId()
         );
         targetMin = challenge.targetMin;
-        if (targetLiquidity < targetMin) {
-            targetMin = targetLiquidity;
-            challenge.targetMin = targetLiquidity;
+        if (sample < targetMin) {
+            targetMin = sample;
+            challenge.targetMin = sample;
         }
     }
 
