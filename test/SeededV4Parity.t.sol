@@ -165,4 +165,85 @@ contract SeededV4ParityTest is BaseForkFixture {
         uint256 amountOut = router.swapExactInput(quote, recipient, block.timestamp, false);
         assertEq(amountOut, quoted, "protocol-fee seeded pool: parity must hold bit-for-bit");
     }
+
+    /// @notice Reverse direction (token6 -> token18): the opposite swap direction of
+    /// testFuzz_seededParity_exactIn, so tick crossings and boundary rounding are
+    /// exercised on the other side of spot.
+    /// @dev The pool is priced 1:1 in raw units, so the raw input bound mirrors MAX_IN.
+    /// forge-config: default.fuzz.runs = 128
+    function testFuzz_seededParity_exactIn_reverse(uint256 amountIn, uint128 l1, uint128 l2, uint128 l3, uint128 l4)
+        public
+    {
+        (l1, l2, l3, l4) = _bounds(l1, l2, l3, l4);
+        _seedPositions(l1, l2, l3, l4);
+
+        amountIn = bound(amountIn, 1e3, MAX_IN);
+
+        Pool memory pool = _v4Pool(address(token6), address(token18));
+        uint256 quoted = router.externalV4QuoteExactIn(SwapHop({pool: pool, amountSpecified: amountIn}));
+        vm.assume(quoted > 0);
+
+        Pool[] memory path = new Pool[](1);
+        path[0] = pool;
+        Quote memory quote = Quote({path: path, amountIn: amountIn, amountOut: quoted});
+
+        uint256 amountOut = router.swapExactInput(quote, recipient, block.timestamp, false);
+        assertEq(amountOut, quoted, "seeded V4 reverse exact-in: realized output must equal quote bit-for-bit");
+        assertEq(ERC20(address(token18)).balanceOf(recipient), amountOut, "recipient must hold the output");
+    }
+
+    /// @notice Reverse direction (token6 -> token18) exact-out, mirroring
+    /// testFuzz_seededParity_exactOut on the opposite swap direction.
+    /// @dev The pool is priced 1:1 in raw units, so the raw output bound (1e12) mirrors
+    /// the forward test's 1_000_000e6 and the raw input cap (1e24) mirrors MAX_IN.
+    /// forge-config: default.fuzz.runs = 128
+    function testFuzz_seededParity_exactOut_reverse(uint256 amountOut, uint128 l1, uint128 l2, uint128 l3, uint128 l4)
+        public
+    {
+        (l1, l2, l3, l4) = _bounds(l1, l2, l3, l4);
+        _seedPositions(l1, l2, l3, l4);
+
+        amountOut = bound(amountOut, 1e3, 1e12);
+
+        Pool memory pool = _v4Pool(address(token6), address(token18));
+        uint256 quotedIn = router.externalV4QuoteExactOut(SwapHop({pool: pool, amountSpecified: amountOut}));
+        // Beyond pool depth the full-fill check surfaces the uint256.max unfillable
+        // sentinel; this assume filters those so only fully-fillable quotes reach the
+        // parity assertion below.
+        vm.assume(quotedIn > 0 && quotedIn < 1e24);
+
+        Pool[] memory path = new Pool[](1);
+        path[0] = pool;
+        Quote memory quote = Quote({path: path, amountIn: quotedIn, amountOut: amountOut});
+
+        uint256 amountIn = router.swapExactOutput(quote, recipient, block.timestamp, false);
+        assertEq(amountIn, quotedIn, "seeded V4 reverse exact-out: realized input must equal quote bit-for-bit");
+        assertEq(ERC20(address(token18)).balanceOf(recipient), amountOut, "recipient must receive the exact output");
+    }
+
+    /// @notice Reverse direction (token6 -> token18) with the same asymmetric protocol
+    /// fee config as testFuzz_seededParity_exactIn_withProtocolFee. The config sets a
+    /// different fee for each swap direction, so swapping the opposite way exercises the
+    /// directional fee component the forward test does not.
+    /// forge-config: default.fuzz.runs = 64
+    function testFuzz_seededParity_exactIn_withProtocolFee_reverse(uint256 amountIn, uint128 liq) public {
+        liq = uint128(bound(liq, 1e18, 1e24));
+        _seedPositions(liq, liq / 2, liq / 4, liq / 8);
+
+        vm.prank(ProtocolFees(POOL_MANAGER).protocolFeeController());
+        ProtocolFees(POOL_MANAGER).setProtocolFee(poolKey, (uint24(700) << 12) | uint24(300));
+
+        amountIn = bound(amountIn, 1e3, MAX_IN);
+
+        Pool memory pool = _v4Pool(address(token6), address(token18));
+        uint256 quoted = router.externalV4QuoteExactIn(SwapHop({pool: pool, amountSpecified: amountIn}));
+        vm.assume(quoted > 0);
+
+        Pool[] memory path = new Pool[](1);
+        path[0] = pool;
+        Quote memory quote = Quote({path: path, amountIn: amountIn, amountOut: quoted});
+
+        uint256 amountOut = router.swapExactInput(quote, recipient, block.timestamp, false);
+        assertEq(amountOut, quoted, "protocol-fee seeded pool (reverse): parity must hold bit-for-bit");
+    }
 }
