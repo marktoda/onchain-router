@@ -12,9 +12,16 @@ contract DeployOnchainRouter is Script {
 
     function setUp() public {}
 
+    /// @dev Owner is read from the ROUTER_OWNER env var, not msg.sender: under some forge
+    /// invocations (multiple keys, certain keystore/hardware flows, a dry run promoted to
+    /// broadcast without --sender) msg.sender falls back to Foundry's DEFAULT_SENDER,
+    /// which would make an unrecoverable address the owner (Ownable2Step has no renounce
+    /// or reset path), permanently freezing the intermediate set.
     function run() public {
+        address initialOwner = vm.envAddress("ROUTER_OWNER");
         vm.startBroadcast();
-        OnchainRouter router = new OnchainRouter(v2Factory, v3Factory, poolManager, weth, msg.sender);
+        OnchainRouter router = new OnchainRouter(v2Factory, v3Factory, poolManager, weth, initialOwner);
         console2.log("OnchainRouter deployed at", address(router));
+        console2.log("Initial owner", initialOwner);
     }
 }

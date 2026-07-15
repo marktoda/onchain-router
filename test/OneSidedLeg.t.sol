@@ -43,7 +43,9 @@ contract OneSidedLegTest is BaseForkFixture {
         _forkBase(32_000_000);
         manager = IPoolManager(POOL_MANAGER);
         lpRouter = new PoolModifyLiquidityTest(manager);
-        router = new OnchainRouterExposed(address(new OSLV2Factory()), address(new OSLV3Factory()), POOL_MANAGER, WETH);
+        router = new OnchainRouterExposed(
+            address(new OSLV2Factory()), address(new OSLV3Factory()), POOL_MANAGER, WETH, address(this)
+        );
 
         tokenIn = new MockERC20("IN", "IN", 18);
         tokenOut = new MockERC20("OUT", "OUT", 18);

@@ -44,12 +44,45 @@ contract IntermediatesTest is MainnetForkFixture {
     }
 
     function _createPool(address t0, address t1) internal {
+        _createPoolLiq(t0, t1, 3e22);
+    }
+
+    function _createPoolLiq(address t0, address t1, uint128 liq) internal {
         address pool = IUniswapV3Factory(V3_FACTORY).createPool(t0, t1, 3000);
         IUniswapV3Pool(pool).initialize(SQRT_PRICE_1_1);
         if (t0 != USDC) MockERC20(t0).mint(address(minter), type(uint128).max);
         if (t1 != USDC) MockERC20(t1).mint(address(minter), type(uint128).max);
         _dealUSDC(address(minter), type(uint128).max);
-        minter.mint(pool, -6000, 6000, 3e22);
+        minter.mint(pool, -6000, 6000, liq);
+    }
+
+    /// @notice With a direct pool plus two configured intermediates of different depth,
+    /// the fold must return the best-amount candidate, not just the first routable one.
+    function test_routeExactInput_picksBestAmongMultipleCandidates() public {
+        MockERC20 x = new MockERC20("X", "X", 18);
+        MockERC20 y = new MockERC20("Y", "Y", 18);
+        MockERC20 deep = new MockERC20("DEEP", "DEEP", 18);
+        MockERC20 mid = new MockERC20("MID", "MID", 18);
+        // Direct x<->y: shallow (worst). Via mid: medium. Via deep: deepest (best).
+        _createPoolLiq(address(x), address(y), 1e20);
+        _createPoolLiq(address(x), address(mid), 5e21);
+        _createPoolLiq(address(mid), address(y), 5e21);
+        _createPoolLiq(address(x), address(deep), 5e23);
+        _createPoolLiq(address(deep), address(y), 5e23);
+        router.addIntermediateToken(address(mid));
+        router.addIntermediateToken(address(deep));
+
+        SwapParams memory params = SwapParams({amountSpecified: 1_000e18, tokenIn: address(x), tokenOut: address(y)});
+        Quote memory best = router.routeExactInput(params);
+
+        Quote memory viaDeep = router.externalRouteExactInputMulti(params, address(deep));
+        Quote memory viaMid = router.externalRouteExactInputMulti(params, address(mid));
+        Quote memory direct = router.externalRouteExactInputSingle(params);
+
+        // The deepest path should win, and the fold must return exactly it
+        assertGt(viaDeep.amountOut, viaMid.amountOut, "deep path should out-quote mid (test premise)");
+        assertGt(viaDeep.amountOut, direct.amountOut, "deep path should out-quote the shallow direct pool");
+        assertEq(best.amountOut, viaDeep.amountOut, "Fold must return the best candidate");
     }
 
     // ======== Admin: access control, cap, dedup ========
