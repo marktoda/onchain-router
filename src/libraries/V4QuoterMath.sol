@@ -83,9 +83,12 @@ library V4QuoterMath {
 
             // Mirror Pool.swap's fee composition instead of trusting the caller's key.fee:
             // the swap fee is the directional protocol fee compounded with the pool's
-            // current LP fee from slot0 (which also covers dynamic-fee pools whose lpFee
-            // differs from key.fee). Hook fee overrides remain out of scope: the quoter
-            // is hook-unaware by design.
+            // current LP fee read from slot0. Because it reads the live lpFee, a
+            // dynamic-fee pool quotes against its currently-set fee rather than the
+            // 0x800000 DYNAMIC_FEE_FLAG sentinel in key.fee; that path is covered by
+            // construction but not yet by a dedicated dynamic-fee-pool parity test
+            // (tracked follow-up). Swap-time hook fee overrides remain out of scope: the
+            // quoter is hook-unaware by design.
             uint16 directionalProtocolFee =
                 quoteParams.zeroForOne ? protocolFee.getZeroForOneFee() : protocolFee.getOneForZeroFee();
             quoteParams.fee = directionalProtocolFee == 0 ? lpFee : directionalProtocolFee.calculateSwapFee(lpFee);

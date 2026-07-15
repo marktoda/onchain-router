@@ -207,8 +207,8 @@ contract QuoteSwapParityV4ProtocolFeeTest is BaseForkFixture {
         }
 
         if (poolFound) {
-            // 0.05% protocol fee in both directions (max is 0.1%)
-            // Asymmetric on purpose: the two directional fee getters must diverge
+            // Asymmetric protocol fee (0.07% oneForZero / 0.03% zeroForOne, max 0.1% per
+            // direction) so the two directional fee getters must diverge
             uint24 protocolFee = (uint24(700) << 12) | uint24(300);
             vm.prank(pm.protocolFeeController());
             pm.setProtocolFee(poolKey, protocolFee);
