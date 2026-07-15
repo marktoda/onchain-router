@@ -199,3 +199,55 @@ contract V4NativeFullFillTest is BaseForkFixture {
 
     receive() external payable {}
 }
+
+/// @notice A pool whose exact-input quote fails (the quoter's gas-capped 0 sentinel) must
+/// not be installed as bestQuote when it is the only candidate: route selection must
+/// return a clean empty quote, and that quote must not be executable.
+contract SentinelRouteSelectionTest is BaseForkFixture {
+    uint160 constant SQRT_PRICE_1_1 = 79228162514264337593543950336;
+
+    IPoolManager manager;
+    OnchainRouterExposed router;
+    MockERC20 tokenA;
+    MockERC20 tokenB;
+    address recipient;
+
+    function setUp() public {
+        _forkBase(32_000_000);
+        manager = IPoolManager(POOL_MANAGER);
+        tokenA = new MockERC20("A", "A", 18);
+        tokenB = new MockERC20("B", "B", 18);
+        router =
+            new OnchainRouterExposed(address(new MockV2Factory()), address(new MockV3Factory()), POOL_MANAGER, WETH);
+        recipient = makeAddr("recipient");
+
+        (Currency c0, Currency c1) = address(tokenA) < address(tokenB)
+            ? (Currency.wrap(address(tokenA)), Currency.wrap(address(tokenB)))
+            : (Currency.wrap(address(tokenB)), Currency.wrap(address(tokenA)));
+        // tickSpacing 1 with zero liquidity: an exact-in quote walks the entire tick
+        // range word by word, exceeds the quoter's 500K gas cap, and yields the 0
+        // sentinel. This initialized pool is the ONLY candidate for the pair.
+        PoolKey memory key =
+            PoolKey({currency0: c0, currency1: c1, fee: 100, tickSpacing: 1, hooks: IHooks(address(0))});
+        manager.initialize(key, SQRT_PRICE_1_1);
+
+        tokenA.mint(address(this), 10e18);
+        tokenA.approve(address(router), type(uint256).max);
+    }
+
+    function test_routeSelection_onlySentinelPool_isUnroutable() public {
+        SwapParams memory params =
+            SwapParams({amountSpecified: 1e18, tokenIn: address(tokenA), tokenOut: address(tokenB)});
+        Quote memory q = router.routeExactInput(params);
+
+        assertEq(q.amountOut, 0, "Sentinel-only pair must quote zero output");
+        assertEq(q.amountIn, 0, "Unroutable quote must not carry the requested amountIn");
+        assertEq(q.path.length, 0, "Sentinel pool must not be installed as a route");
+
+        // Non-executability: before normalization the quote carried a non-empty path
+        // with amountOut 0, which the 4-arg entrypoint would happily execute with an
+        // effective minAmountOut of 0. The empty quote must revert instead.
+        vm.expectRevert();
+        router.swapExactInput(q, recipient, block.timestamp, false);
+    }
+}

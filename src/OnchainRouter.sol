@@ -374,7 +374,13 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter,
             else if (pool.version == V3) amountOut = v3QuoteExactIn(swap);
             else amountOut = v2QuoteExactIn(swap);
 
-            if (bestQuote.amountOut == 0 || amountOut > bestQuote.amountOut) {
+            // Strict comparison: a zero amountOut is the quoters' failure sentinel
+            // (e.g. a gas-capped V4 quote), so a pool that only quotes 0 must never be
+            // installed as bestQuote. Otherwise, when it is the sole candidate, the
+            // caller gets a non-empty path with amountOut 0 — executable via the 4-arg
+            // swapExactInput with an effective minAmountOut of 0 — instead of a clean
+            // empty (unroutable) quote.
+            if (amountOut > bestQuote.amountOut) {
                 bestQuote = pool.createQuoteSingle(params.amountSpecified, amountOut);
             }
         }
