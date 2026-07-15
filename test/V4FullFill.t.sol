@@ -10,6 +10,7 @@ import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
 import {ModifyLiquidityParams} from "v4-core/src/types/PoolOperation.sol";
 import {SwapParams, Quote, Pool, SwapHop, V4} from "../src/base/OnchainRouterStructs.sol";
 import {SwapExecutor} from "../src/base/SwapExecutor.sol";
+import {ERC20} from "solmate/src/tokens/ERC20.sol";
 import {OnchainRouterExposed} from "./utils/OnchainRouterExposed.sol";
 import {BaseForkFixture} from "./utils/ForkFixtures.sol";
 
@@ -121,6 +122,79 @@ contract V4FullFillTest is BaseForkFixture {
         // The caller is charged only what the swap actually consumed
         uint256 spent = selfBefore - tokenA.balanceOf(address(this));
         assertLt(spent, amountIn, "Partial fill must consume less than the full input");
+    }
+
+    receive() external payable {}
+}
+
+/// @notice Native-ETH analog of the exact-in partial-fill refund: when the V4 pool uses
+/// Currency.wrap(address(0)) for input, the executor must unwrap only the consumed input.
+/// Unwrapping the full funded amount would strand the unconsumed remainder as native ETH,
+/// invisible to the WETH-denominated refund accounting.
+contract V4NativeFullFillTest is BaseForkFixture {
+    uint160 constant SQRT_PRICE_1_1 = 79228162514264337593543950336;
+
+    IPoolManager manager;
+    PoolModifyLiquidityTest lpRouter;
+    OnchainRouterExposed router;
+    MockERC20 tokenB;
+    PoolKey poolKey;
+    Pool pool;
+    address recipient;
+
+    function setUp() public {
+        _forkBase(32_000_000);
+        manager = IPoolManager(POOL_MANAGER);
+        lpRouter = new PoolModifyLiquidityTest(manager);
+        tokenB = new MockERC20("B", "B", 18);
+        router =
+            new OnchainRouterExposed(address(new MockV2Factory()), address(new MockV3Factory()), POOL_MANAGER, WETH);
+        recipient = makeAddr("recipient");
+
+        // Native ETH (address(0)) sorts below every token, so it is always currency0
+        poolKey = PoolKey({
+            currency0: Currency.wrap(address(0)),
+            currency1: Currency.wrap(address(tokenB)),
+            fee: 3000,
+            tickSpacing: 60,
+            hooks: IHooks(address(0))
+        });
+        manager.initialize(poolKey, SQRT_PRICE_1_1);
+
+        tokenB.mint(address(this), type(uint128).max);
+        tokenB.approve(address(lpRouter), type(uint256).max);
+        vm.deal(address(this), 20_000e18);
+
+        // Shallow, single narrow position; the LP router refunds unused ETH
+        lpRouter.modifyLiquidity{value: 1e18}(
+            poolKey, ModifyLiquidityParams({tickLower: -60, tickUpper: 60, liquidityDelta: int256(1e15), salt: 0}), ""
+        );
+
+        pool = Pool({
+            tokenIn: address(0), tokenOut: address(tokenB), fee: 3000, pool: address(0), version: V4, key: poolKey
+        });
+    }
+
+    /// @dev Same shape as test_v4ExactIn_partialFill_refundsUnconsumedInput but with a
+    /// native-ETH first hop: the caller funds msg.value (wrapped to WETH), the pool
+    /// partial-fills under a loose minAmountOut, and the unconsumed input must come back
+    /// to the caller with nothing left in the router.
+    function test_v4ExactIn_nativePartialFill_refundsUnconsumedInput() public {
+        uint256 amountIn = 5_000e18; // far more than the shallow pool can absorb
+        Pool[] memory path = new Pool[](1);
+        path[0] = pool;
+        // minAmountOut = 1: deliberately loose so TooLittleReceived does not fire
+        Quote memory quote = Quote({path: path, amountIn: amountIn, amountOut: 0});
+
+        uint256 selfBefore = address(this).balance;
+        router.swapExactInput{value: amountIn}(quote, recipient, block.timestamp, false, 1);
+
+        // The caller is charged only what the swap actually consumed
+        uint256 spent = selfBefore - address(this).balance;
+        assertLt(spent, amountIn, "Partial fill must consume less than the full input");
+        assertGt(tokenB.balanceOf(recipient), 0, "Partial output must still be delivered");
+        assertEq(address(router).balance, 0, "No native ETH may strand in the router");
+        assertEq(ERC20(WETH).balanceOf(address(router)), 0, "No WETH may strand in the router");
     }
 
     receive() external payable {}

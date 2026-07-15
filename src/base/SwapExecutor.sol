@@ -157,11 +157,6 @@ abstract contract SwapExecutor is OnchainRouterImmutables, IUnlockCallback {
         Currency inputCurrency = Currency.wrap(pool.tokenIn);
         Currency outputCurrency = Currency.wrap(pool.tokenOut);
 
-        // Pre-swap: unwrap WETH→ETH if V4 pool uses native ETH for input
-        if (inputCurrency.isAddressZero()) {
-            IWETH9(weth).withdraw(amountIn);
-        }
-
         // V4 convention: negative amountSpecified = exact input
         BalanceDelta delta = poolManager.swap(
             key,
@@ -179,6 +174,14 @@ abstract contract SwapExecutor is OnchainRouterImmutables, IUnlockCallback {
 
         // Settle input (negative delta = we owe pool manager)
         uint256 inputAmount = uint256(uint128(zeroForOne ? -delta0 : -delta1));
+
+        // Pre-settle: unwrap WETH→ETH if the V4 pool uses native ETH for input, for
+        // exactly the consumed amount (mirrors the exact-output hop). Unwrapping the
+        // full funded amountIn would strand the unconsumed remainder as native ETH on
+        // a partial fill, invisible to the WETH-denominated refund in OnchainRouter.
+        if (inputCurrency.isAddressZero()) {
+            IWETH9(weth).withdraw(inputAmount);
+        }
         _v4Settle(inputCurrency, inputAmount);
 
         // Take output (positive delta = pool manager owes us)
