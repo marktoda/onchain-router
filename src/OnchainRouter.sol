@@ -113,7 +113,7 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter,
         // user-facing token is intermediateToken (WETH). Resolve that here.
         address userTokenIn = _resolveUserToken(quote.path[0].tokenIn);
 
-        _fundInput(userTokenIn, quote.amountIn);
+        uint256 balanceBefore = _fundInput(userTokenIn, quote.amountIn);
 
         address swapRecipient = unwrapOutput ? address(this) : recipient;
         amountOut = _swapExactInput(quote, swapRecipient);
@@ -123,6 +123,23 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter,
         if (unwrapOutput) {
             IWETH9(intermediateToken).withdraw(amountOut);
             SafeTransferLib.safeTransferETH(recipient, amountOut);
+        }
+
+        // Refund unconsumed input. A V4 first hop can partial-fill (consume less than the
+        // funded amount before hitting its price limit); with a loose minAmountOut the
+        // TooLittleReceived check does not fire, so without this the remainder would
+        // strand in the router, sweepable by a later caller. Output is a different token
+        // than userTokenIn on every real route, so the balance delta is purely input.
+        // Clamped so a mid-swap credit cannot underflow (mirrors the exact-output path).
+        uint256 excess = ERC20(userTokenIn).balanceOf(address(this)) - balanceBefore;
+        if (excess > quote.amountIn) excess = quote.amountIn;
+        if (excess > 0) {
+            if (msg.value > 0) {
+                IWETH9(intermediateToken).withdraw(excess);
+                SafeTransferLib.safeTransferETH(msg.sender, excess);
+            } else {
+                SafeTransferLib.safeTransfer(ERC20(userTokenIn), msg.sender, excess);
+            }
         }
     }
 

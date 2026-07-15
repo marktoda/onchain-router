@@ -104,5 +104,24 @@ contract V4FullFillTest is BaseForkFixture {
         assertLe(amountIn, quotedIn, "Input within bound");
     }
 
+    /// @dev A loose minAmountOut makes a partial-fill exact-in swap succeed: the V4 pool
+    /// consumes only part of the input before hitting its price limit. The unconsumed
+    /// input must be refunded, not stranded in the router where it is sweepable.
+    function test_v4ExactIn_partialFill_refundsUnconsumedInput() public {
+        uint256 amountIn = 5_000e18; // far more than the shallow pool can absorb
+        Pool[] memory path = new Pool[](1);
+        path[0] = pool;
+        // minAmountOut = 1: deliberately loose so TooLittleReceived does not fire
+        Quote memory quote = Quote({path: path, amountIn: amountIn, amountOut: 0});
+
+        uint256 selfBefore = tokenA.balanceOf(address(this));
+        router.swapExactInput(quote, recipient, block.timestamp, false, 1);
+
+        assertEq(tokenA.balanceOf(address(router)), 0, "No input token may strand in the router");
+        // The caller is charged only what the swap actually consumed
+        uint256 spent = selfBefore - tokenA.balanceOf(address(this));
+        assertLt(spent, amountIn, "Partial fill must consume less than the full input");
+    }
+
     receive() external payable {}
 }
