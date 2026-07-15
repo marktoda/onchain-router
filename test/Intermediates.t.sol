@@ -119,7 +119,7 @@ contract IntermediatesTest is MainnetForkFixture {
 
     function test_intermediates_initialSetIsWeth() public {
         assertEq(router.intermediateTokensLength(), 1);
-        assertEq(router.intermediateTokens(0), WETH);
+        assertEq(router.getIntermediateTokens()[0], WETH);
     }
 
     function test_addIntermediateToken_onlyOwner() public {
@@ -148,6 +148,23 @@ contract IntermediatesTest is MainnetForkFixture {
         router.addIntermediateToken(address(tokenA));
         vm.expectRevert(OnchainRouter.TooManyIntermediates.selector);
         router.addIntermediateToken(address(tokenB));
+    }
+
+    function test_getIntermediateTokens_returnsWholeSet() public {
+        address[] memory initial = router.getIntermediateTokens();
+        assertEq(initial.length, 1);
+        assertEq(initial[0], WETH);
+
+        router.addIntermediateToken(USDC);
+        address[] memory afterAdd = router.getIntermediateTokens();
+        assertEq(afterAdd.length, 2);
+        assertEq(afterAdd[0], WETH);
+        assertEq(afterAdd[1], USDC);
+
+        router.removeIntermediateToken(WETH);
+        address[] memory afterRemove = router.getIntermediateTokens();
+        assertEq(afterRemove.length, 1);
+        assertEq(afterRemove[0], USDC);
     }
 
     function test_removeIntermediateToken_removesAndReverts() public {

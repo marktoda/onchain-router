@@ -39,7 +39,7 @@ contract OnchainRouter is
     /// @notice Routing intermediates for 2-hop paths. WETH's OTHER role, the canonical
     /// wrapper for native ETH (msg.value handling, V4 address(0) aliasing), stays pinned
     /// to the intermediateToken immutable and is unaffected by this set.
-    address[] public intermediateTokens;
+    address[] internal intermediateTokens;
 
     event IntermediateTokenAdded(address indexed token);
     event IntermediateTokenRemoved(address indexed token);
@@ -114,6 +114,13 @@ contract OnchainRouter is
     /// @notice Number of configured routing intermediates.
     function intermediateTokensLength() external view returns (uint256) {
         return intermediateTokens.length;
+    }
+
+    /// @notice The full routing-intermediate set, read atomically in one call so
+    /// integrators get a consistent snapshot. Replaces a public per-index getter, which
+    /// would cost contract-size headroom the router does not have (EIP-170) to duplicate.
+    function getIntermediateTokens() external view returns (address[] memory) {
+        return intermediateTokens;
     }
 
     receive() external payable {}
