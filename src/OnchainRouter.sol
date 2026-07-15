@@ -57,6 +57,10 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter,
     /// msg.value must equal quote.amountIn exactly. Set unwrapOutput=true to receive ETH
     /// instead of WETH. The quote's amountOut acts as the minimum-output bound (zero
     /// slippage tolerance); use the minAmountOut overload to allow tolerance.
+    /// The bound is checked against the pool-reported output (pre any output-token
+    /// transfer fee), not the recipient's delivered balance: output-side fee-on-transfer
+    /// detection is out of scope for v1, so a fee-on-transfer output token can deliver
+    /// below the bound. Input-side short-delivery is rejected (see _fundInput).
     /// @param quote Quote from routeExactInput containing path and amounts
     /// @param recipient Address that receives output tokens
     /// @param deadline Unix timestamp after which the swap reverts
@@ -216,10 +220,13 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter,
             SafeTransferLib.safeTransferETH(recipient, outputAmount);
         }
 
-        // Leftover userTokenIn above the pre-funding balance is the unspent input, in the
-        // right units regardless of path shape. Clamped to the funded amount so a mid-swap
-        // credit of userTokenIn to the router (e.g. by a V4 hook or token callback) cannot
-        // underflow amountIn; such a credit stays in the router rather than being refunded.
+        // Leftover userTokenIn above the pre-funding balance is refunded to the caller.
+        // Clamped to the funded amount: a mid-swap credit of userTokenIn (e.g. a V4 hook
+        // or token callback) is refunded to the caller up to what they funded, and only
+        // any overflow beyond the funded amount stays in the router. Note the returned
+        // amountIn is derived from this delta, so a credit below the unspent margin makes
+        // it under-report true consumed input; integrators settling on the return value
+        // should treat it as a lower bound, not an exact consumed figure.
         uint256 excess = ERC20(userTokenIn).balanceOf(address(this)) - balanceBefore;
         if (excess > quote.amountIn) excess = quote.amountIn;
         amountIn = quote.amountIn - excess;
@@ -307,11 +314,18 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter,
         Quote memory inputToIntermediate = routeExactInputSingle(
             SwapParams({tokenIn: params.tokenIn, tokenOut: intermediate, amountSpecified: params.amountSpecified})
         );
+        // A one-sided route (first leg routable, second not) must not combine into a
+        // quote whose path dead-ends at the intermediate: that bogus quote has
+        // amountOut 0 but a non-empty path, and better() would still prefer it over an
+        // empty direct quote, so a caller keying off path.length would deliver the
+        // intermediate token instead of tokenOut. Return an empty quote instead.
+        if (inputToIntermediate.amountOut == 0) return bestQuote;
         Quote memory intermediateToOutput = routeExactInputSingle(
             SwapParams({
                 tokenIn: intermediate, tokenOut: params.tokenOut, amountSpecified: inputToIntermediate.amountOut
             })
         );
+        if (intermediateToOutput.amountOut == 0) return bestQuote;
         bestQuote = inputToIntermediate.combine(intermediateToOutput);
     }
 
@@ -335,6 +349,12 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter,
                 tokenIn: params.tokenIn, tokenOut: intermediate, amountSpecified: outputToIntermediate.amountIn
             })
         );
+        // Same one-sided guard for the input leg: an unroutable second leg must surface
+        // the sentinel, not a combined quote that dead-ends at the intermediate.
+        if (intermediateToInput.amountIn == 0 || intermediateToInput.amountIn == type(uint256).max) {
+            bestQuote.amountIn = type(uint256).max;
+            return bestQuote;
+        }
 
         bestQuote = intermediateToInput.combine(outputToIntermediate);
     }
