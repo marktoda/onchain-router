@@ -48,7 +48,10 @@ contract V4BaseForkTest is Test {
 
     function setUp() public {
         string memory rpc = vm.envString("BASE_RPC_URL");
-        vm.createSelectFork(rpc);
+        // Pinned for deterministic CI: an unpinned fork made results depend on live Base
+        // state at run time, so a swap could pass locally and revert in CI at a different
+        // block. 32_000_000 matches the other Base-fork suites.
+        vm.createSelectFork(rpc, 32_000_000);
 
         router = new OnchainRouterExposed(V2_FACTORY, V3_FACTORY, POOL_MANAGER, WETH);
         recipient = makeAddr("recipient");
