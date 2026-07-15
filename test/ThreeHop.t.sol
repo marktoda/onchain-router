@@ -50,11 +50,15 @@ contract ThreeHopTest is MainnetForkFixture {
     }
 
     function _createPool(address t0, address t1) internal {
+        _createPoolLiq(t0, t1, 3e22);
+    }
+
+    function _createPoolLiq(address t0, address t1, uint128 liq) internal {
         address pool = IUniswapV3Factory(V3_FACTORY).createPool(t0, t1, 3000);
         IUniswapV3Pool(pool).initialize(SQRT_PRICE_1_1);
         MockERC20(t0).mint(address(minter), type(uint128).max);
         MockERC20(t1).mint(address(minter), type(uint128).max);
-        minter.mint(pool, -6000, 6000, 3e22);
+        minter.mint(pool, -6000, 6000, liq);
     }
 
     // ======== Routing ========
@@ -175,6 +179,30 @@ contract ThreeHopTest is MainnetForkFixture {
         uint256 maxAmountIn = (quote.amountIn * 95) / 100;
         vm.expectRevert(SwapExecutor.V3TooMuchRequested.selector);
         router.swapExactOutput(quote, recipient, block.timestamp, false, maxAmountIn);
+    }
+
+    /// @notice Exercises the INNER skip branches: with a deep A->Z->B path available and
+    /// a shallow middle X->Z pool, the 3-hop candidate through (X, Z) must skip on the
+    /// unfillable middle leg (legTwo) rather than fold a bad quote, while the good route
+    /// still wins.
+    function test_threeHop_innerSkip_onUnfillableMiddleLeg() public {
+        MockERC20 tokenZ = new MockERC20("TokenZ", "TKZ", 18);
+        router.addIntermediateToken(address(tokenZ));
+
+        // Deep A->Z and Z->B so a 3-hop through Z is viable; shallow X->Z so any candidate
+        // routing X->Z hits the exact-out sentinel and takes the inner skip.
+        _createPoolLiq(address(tokenA), address(tokenZ), 5e23);
+        _createPoolLiq(address(tokenZ), address(tokenB), 5e23);
+        _createPoolLiq(address(tokenX), address(tokenZ), 1e12);
+
+        SwapParams memory params =
+            SwapParams({amountSpecified: 100e18, tokenIn: address(tokenA), tokenOut: address(tokenB)});
+        Quote memory q = router.routeExactOutput3Hop(params);
+
+        // A real route exists (A->Z->B at least); it must be priced, not poisoned by the
+        // shallow X->Z candidate that the inner skip discards.
+        assertGt(q.amountIn, 0, "A viable route must be found");
+        assertTrue(q.amountIn != type(uint256).max, "Result must not be the unfillable sentinel");
     }
 
     receive() external payable {}

@@ -377,7 +377,11 @@ contract OnchainRouter is
     /// stay 2-hop. The result is a superset search: direct and 2-hop candidates are
     /// always included, so this never returns a worse route than routeExactInput.
     function routeExactInput3Hop(SwapParams memory params) external view returns (Quote memory bestQuote) {
-        bestQuote = routeExactInput(params);
+        // Fold direct, 2-hop, and 3-hop candidates in one pass. The tokenIn->first leg is
+        // computed once per intermediate and reused for both the 2-hop and every 3-hop
+        // candidate through that intermediate, instead of calling routeExactInput (which
+        // would re-sweep each first leg).
+        bestQuote = routeExactInputSingle(params);
         uint256 length = intermediateTokens.length;
         for (uint256 i = 0; i < length; i++) {
             address first = intermediateTokens[i];
@@ -387,6 +391,13 @@ contract OnchainRouter is
             );
             if (legOne.amountOut == 0) continue;
 
+            // 2-hop candidate through `first`
+            Quote memory firstToOut = routeExactInputSingle(
+                SwapParams({tokenIn: first, tokenOut: params.tokenOut, amountSpecified: legOne.amountOut})
+            );
+            if (firstToOut.amountOut != 0) bestQuote = legOne.combine(firstToOut).better(bestQuote);
+
+            // 3-hop candidates first -> second -> tokenOut
             for (uint256 j = 0; j < length; j++) {
                 if (j == i) continue;
                 address second = intermediateTokens[j];
@@ -409,11 +420,13 @@ contract OnchainRouter is
     /// @notice Exact-output twin of routeExactInput3Hop: legs are sized backwards from
     /// the requested output, then combined forward. Same opt-in cost profile.
     function routeExactOutput3Hop(SwapParams memory params) external view returns (Quote memory bestQuote) {
-        bestQuote = routeExactOutput(params);
+        // Fold direct, 2-hop, and 3-hop in one pass. The outer loop walks the LAST
+        // intermediate (second) because exact-output legs are sized backwards from the
+        // requested output; second->tokenOut is computed once per intermediate and reused
+        // for both the 2-hop and every 3-hop candidate through it, instead of calling
+        // routeExactOutput (which would re-sweep each of those legs).
+        bestQuote = routeExactOutputSingle(params);
         uint256 length = intermediateTokens.length;
-        // The outer loop walks the LAST intermediate (second) because exact-output legs
-        // are sized backwards from the requested output; the inner loop then prices the
-        // earlier hops for each candidate tail
         for (uint256 i = 0; i < length; i++) {
             address second = intermediateTokens[i];
             if (second == params.tokenIn || second == params.tokenOut) continue;
@@ -422,6 +435,15 @@ contract OnchainRouter is
             );
             if (legThree.amountIn == 0 || legThree.amountIn == type(uint256).max) continue;
 
+            // 2-hop candidate tokenIn -> second -> tokenOut
+            Quote memory inToSecond = routeExactOutputSingle(
+                SwapParams({tokenIn: params.tokenIn, tokenOut: second, amountSpecified: legThree.amountIn})
+            );
+            if (inToSecond.amountIn != 0 && inToSecond.amountIn != type(uint256).max) {
+                bestQuote = inToSecond.combine(legThree).better(bestQuote);
+            }
+
+            // 3-hop candidates tokenIn -> first -> second -> tokenOut
             for (uint256 j = 0; j < length; j++) {
                 if (j == i) continue;
                 address first = intermediateTokens[j];
