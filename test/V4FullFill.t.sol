@@ -50,9 +50,8 @@ contract V4FullFillTest is BaseForkFixture {
         lpRouter = new PoolModifyLiquidityTest(manager);
         tokenA = new MockERC20("A", "A", 18);
         tokenB = new MockERC20("B", "B", 18);
-        router = new OnchainRouterExposed(
-            address(new MockV2Factory()), address(new MockV3Factory()), POOL_MANAGER, WETH, address(this)
-        );
+        router =
+            new OnchainRouterExposed(address(new MockV2Factory()), address(new MockV3Factory()), POOL_MANAGER, WETH);
         recipient = makeAddr("recipient");
 
         (Currency c0, Currency c1) = address(tokenA) < address(tokenB)
