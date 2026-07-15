@@ -296,6 +296,14 @@ contract V4LeaderboardTest is Test {
     uint256 constant CHALLENGE_EXPIRY = 3 days;
     uint256 constant SLOT_COOLDOWN = 3 days;
 
+    /// @dev Absolute test clock, mirroring every vm.warp target. Under via-IR the
+    /// optimizer may legally CSE repeated `block.timestamp` reads across a vm.warp
+    /// cheatcall (TIMESTAMP is transaction-invariant on a real chain), so
+    /// `vm.warp(block.timestamp + x)` after an earlier warp can silently reuse the
+    /// stale pre-warp value. All time advancement must go through _warpBy, which
+    /// never reads block.timestamp.
+    uint256 warped;
+
     // Redeclared locally so vm.expectEmit can reference it (topic matching is by signature)
     event V4ChallengePoked(
         bytes32 indexed pairHash,
@@ -317,7 +325,15 @@ contract V4LeaderboardTest is Test {
 
         router = new OnchainRouterExposed(v2Factory, v3Factory, POOL_MANAGER, WETH, address(this));
         // Start at a realistic timestamp so time math has room
-        vm.warp(365 days * 56);
+        warped = 365 days * 56;
+        vm.warp(warped);
+    }
+
+    /// @dev Advance the chain clock by delta seconds. See the `warped` doc for why
+    /// tests must never compute warp targets from block.timestamp directly.
+    function _warpBy(uint256 delta) internal {
+        warped += delta;
+        vm.warp(warped);
     }
 
     // ======== Direct registration (non-full board) ========
@@ -421,7 +437,7 @@ contract V4LeaderboardTest is Test {
         _start(address(uint160(9000)), address(uint160(3000)));
 
         // At exactly cooldownUntil the slot becomes contestable
-        vm.warp(block.timestamp + SLOT_COOLDOWN);
+        _warpBy(SLOT_COOLDOWN);
         _start(address(uint160(9000)), address(uint160(3000)));
     }
 
@@ -443,7 +459,7 @@ contract V4LeaderboardTest is Test {
         _start(challengerOne, address(uint160(3000)));
 
         // Past expiry the same config can start fresh
-        vm.warp(block.timestamp + CHALLENGE_EXPIRY + 1);
+        _warpBy(CHALLENGE_EXPIRY + 1);
         _start(challengerOne, address(uint160(3000)));
     }
 
@@ -456,7 +472,7 @@ contract V4LeaderboardTest is Test {
 
         // Inclusive boundary: at exactly startedAt + EXPIRY the challenge still occupies
         // its key and re-declaring must revert
-        vm.warp(block.timestamp + CHALLENGE_EXPIRY);
+        _warpBy(CHALLENGE_EXPIRY);
         vm.expectRevert(V4PoolRegistry.ChallengePending.selector);
         _start(challenger, address(uint160(3000)));
     }
@@ -473,7 +489,7 @@ contract V4LeaderboardTest is Test {
         _mockPool(challenger, 1000e18);
         _start(challenger, target);
 
-        vm.warp(block.timestamp + CHALLENGE_DELAY);
+        _warpBy(CHALLENGE_DELAY);
         assertTrue(_finalize(challenger), "Challenger with strictly higher min must evict the named target");
 
         // The challenger now holds the slot: re-using it as a challenger config hits the
@@ -495,7 +511,7 @@ contract V4LeaderboardTest is Test {
         _mockPool(challenger, 1000e18);
         _start(challenger, address(uint160(3000)));
 
-        vm.warp(block.timestamp + CHALLENGE_DELAY - 1);
+        _warpBy(CHALLENGE_DELAY - 1);
         vm.expectRevert(V4PoolRegistry.ChallengeNotReady.selector);
         _finalize(challenger);
     }
@@ -512,7 +528,7 @@ contract V4LeaderboardTest is Test {
         _mockPool(challenger, 100e18); // exactly equal to the target's liquidity
         _start(challenger, address(uint160(3000)));
 
-        vm.warp(block.timestamp + CHALLENGE_DELAY);
+        _warpBy(CHALLENGE_DELAY);
         assertFalse(_finalize(challenger), "Equal mins must keep the incumbent (strict inequality)");
     }
 
@@ -525,7 +541,7 @@ contract V4LeaderboardTest is Test {
         _start(challenger, target);
 
         // Capital leaves mid-window; anyone pokes and pins the challenger's min at 1
-        vm.warp(block.timestamp + 12 hours);
+        _warpBy(12 hours);
         _mockLiquidityFor(challenger, 1);
         vm.expectEmit(true, false, false, true);
         emit V4ChallengePoked(_pairHash(), 500, 10, challenger, 1, 100e18);
@@ -533,7 +549,7 @@ contract V4LeaderboardTest is Test {
 
         // JIT re-add right before finalization cannot raise the recorded min
         _mockLiquidityFor(challenger, 1000e18);
-        vm.warp(block.timestamp + CHALLENGE_DELAY);
+        _warpBy(CHALLENGE_DELAY);
         assertFalse(_finalize(challenger), "Flash/JIT liquidity at finalize must not win");
 
         // The target survived and is immediately re-challengeable (failed challenges
@@ -551,7 +567,7 @@ contract V4LeaderboardTest is Test {
         _start(challenger, target);
 
         // The target's LPs leave mid-window; a poke pins its min at 1
-        vm.warp(block.timestamp + 12 hours);
+        _warpBy(12 hours);
         _mockLiquidityFor(target, 1);
         vm.expectEmit(true, false, false, true);
         emit V4ChallengePoked(_pairHash(), 500, 10, challenger, 50e18, 1);
@@ -559,7 +575,7 @@ contract V4LeaderboardTest is Test {
 
         // Front-running finalize with a big deposit is pointless: the min stands
         _mockLiquidityFor(target, 500e18);
-        vm.warp(block.timestamp + CHALLENGE_DELAY);
+        _warpBy(CHALLENGE_DELAY);
         assertTrue(_finalize(challenger), "Liquidity added after a low poke must not save the target");
     }
 
@@ -576,7 +592,7 @@ contract V4LeaderboardTest is Test {
         emit V4ChallengePoked(_pairHash(), 500, 10, challenger, 1, 100e18);
         _poke(challenger);
 
-        vm.warp(block.timestamp + CHALLENGE_DELAY);
+        _warpBy(CHALLENGE_DELAY);
         assertFalse(_finalize(challenger), "A min can never be raised by a poke");
     }
 
@@ -593,11 +609,11 @@ contract V4LeaderboardTest is Test {
         _start(challenger, address(uint160(3000)));
 
         // Valid at exactly startedAt + EXPIRY...
-        vm.warp(block.timestamp + CHALLENGE_EXPIRY);
+        _warpBy(CHALLENGE_EXPIRY);
         _poke(challenger);
 
         // ...and expired one second later
-        vm.warp(block.timestamp + 1);
+        _warpBy(1);
         vm.expectRevert(V4PoolRegistry.ChallengeExpired.selector);
         _poke(challenger);
     }
@@ -611,7 +627,7 @@ contract V4LeaderboardTest is Test {
         _mockPool(challenger, 1000e18);
         _start(challenger, target);
 
-        vm.warp(block.timestamp + CHALLENGE_EXPIRY + 1);
+        _warpBy(CHALLENGE_EXPIRY + 1);
         assertFalse(_finalize(challenger), "Expired challenge must fail, not evict");
 
         // The target kept its slot: challenging it again works immediately
@@ -629,7 +645,7 @@ contract V4LeaderboardTest is Test {
         _start(challenger, target);
 
         // Exactly at EXPIRY the challenge is still valid and must evict
-        vm.warp(block.timestamp + CHALLENGE_EXPIRY);
+        _warpBy(CHALLENGE_EXPIRY);
         assertTrue(_finalize(challenger), "Finalize at exactly the expiry boundary must still succeed");
     }
 
@@ -647,7 +663,7 @@ contract V4LeaderboardTest is Test {
         _start(first, target);
         _start(second, target);
 
-        vm.warp(block.timestamp + CHALLENGE_DELAY);
+        _warpBy(CHALLENGE_DELAY);
         assertTrue(_finalize(first), "First finalized eviction wins the slot");
         assertFalse(_finalize(second), "Later challenge against the departed target is void");
 
@@ -664,7 +680,7 @@ contract V4LeaderboardTest is Test {
         _mockPool(challenger, 1e18); // far below the target's 100e18
         _start(challenger, target);
 
-        vm.warp(block.timestamp + CHALLENGE_DELAY);
+        _warpBy(CHALLENGE_DELAY);
         assertFalse(_finalize(challenger), "Underweight challenger must lose");
 
         // Deliberately NO cooldown after a failed challenge: otherwise an incumbent
@@ -672,7 +688,7 @@ contract V4LeaderboardTest is Test {
         // permanent immunity. Same challenger, same target, immediately: allowed.
         _mockLiquidityFor(challenger, 1000e18);
         _start(challenger, target);
-        vm.warp(block.timestamp + CHALLENGE_DELAY);
+        _warpBy(CHALLENGE_DELAY);
         assertTrue(_finalize(challenger), "Failed challenge must leave the target immediately contestable");
     }
 
@@ -684,7 +700,7 @@ contract V4LeaderboardTest is Test {
         address challenger = address(uint160(9000));
         _mockPool(challenger, 1000e18);
         _start(challenger, target);
-        vm.warp(block.timestamp + CHALLENGE_DELAY);
+        _warpBy(CHALLENGE_DELAY);
         assertTrue(_finalize(challenger));
 
         // Fresh eviction winner cannot be named as a target until its cooldown lapses
@@ -693,7 +709,7 @@ contract V4LeaderboardTest is Test {
         vm.expectRevert(V4PoolRegistry.SlotInCooldown.selector);
         _start(next, challenger);
 
-        vm.warp(block.timestamp + SLOT_COOLDOWN);
+        _warpBy(SLOT_COOLDOWN);
         _start(next, challenger);
     }
 
@@ -722,7 +738,7 @@ contract V4LeaderboardTest is Test {
     /// @dev Registration stamps every slot's membership cooldown; most challenge tests
     /// want a settled board, so roll time past it
     function _rollPastCooldown() internal {
-        vm.warp(block.timestamp + SLOT_COOLDOWN + 1);
+        _warpBy(SLOT_COOLDOWN + 1);
     }
 
     function _pairHash() internal pure returns (bytes32) {
