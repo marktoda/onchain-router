@@ -112,7 +112,7 @@ contract OnchainRouter is
     receive() external payable {}
 
     // ─────────────────────────────────────────────────────────────
-    //  Swap Execution (with V4 score tracking)
+    //  Swap Execution
     // ─────────────────────────────────────────────────────────────
 
     /// @notice Execute an exact-input swap using a previously obtained quote.
@@ -159,8 +159,8 @@ contract OnchainRouter is
     }
 
     /// @dev Layered safety on this path: (1) deadline check; (2) nonReentrant entrypoints —
-    /// the contract is otherwise stateless per call (V4 scores and the MaxInputAmount
-    /// transient are the only writes); (3) FOT input detection via balance measurement;
+    /// the contract is otherwise stateless per call (the MaxInputAmount transient is the
+    /// only write); (3) FOT input detection via balance measurement;
     /// (4) minAmountOut enforced by the executor (SwapExecutor.TooLittleReceived) against
     /// realized output on both the direct and V4-unlock paths.
     function _swapExactInputWithBound(
@@ -184,8 +184,6 @@ contract OnchainRouter is
 
         address swapRecipient = unwrapOutput ? address(this) : recipient;
         amountOut = _swapExactInput(quote, swapRecipient);
-
-        _recordV4Wins(quote);
 
         if (unwrapOutput) {
             IWETH9(intermediateToken).withdraw(amountOut);
@@ -275,8 +273,6 @@ contract OnchainRouter is
         // Realized input is derived from the balance delta below instead.
         _swapExactOutput(quote, swapRecipient);
 
-        _recordV4Wins(quote);
-
         if (unwrapOutput) {
             uint256 outputAmount = quote.amountOut;
             IWETH9(intermediateToken).withdraw(outputAmount);
@@ -328,18 +324,6 @@ contract OnchainRouter is
             SafeTransferLib.safeTransferFrom(ERC20(token), msg.sender, address(this), amount);
             uint256 received = ERC20(token).balanceOf(address(this)) - balanceBefore;
             if (received != amount) revert InputAmountMismatch(amount, received);
-        }
-    }
-
-    /// @notice Stamp routed V4 leaderboard pools with an epoch win: recently useful
-    /// pools are shielded from leaderboard eviction (see V4PoolRegistry)
-    function _recordV4Wins(Quote memory quote) private {
-        for (uint256 i = 0; i < quote.path.length; i++) {
-            Pool memory pool = quote.path[i];
-            if (pool.version == V4) {
-                bytes32 ph = _pairHash(pool.tokenIn, pool.tokenOut);
-                _recordV4Win(ph, pool.key.fee, pool.key.tickSpacing, address(pool.key.hooks));
-            }
         }
     }
 

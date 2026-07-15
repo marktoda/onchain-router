@@ -11,13 +11,18 @@ import {Pool, V4} from "./OnchainRouterStructs.sol";
 import {OnchainRouterImmutables} from "./OnchainRouterImmutables.sol";
 
 /// @notice Discovers V4 pools via default fee/tickSpacing configs and a per-pair leaderboard.
-/// @dev Default configs check standard (fee, tickSpacing) combos with hooks=address(0).
-/// The leaderboard holds up to 8 registered pools per pair. Joining a non-full board is
-/// direct; a full board is contested through a TWO-PHASE CHALLENGE: declare, wait
-/// CHALLENGE_DELAY, then finalize with a fresh liquidity comparison. The delay makes
-/// just-in-time liquidity expensive (capital must stay parked for a day), and incumbents
-/// that recently won routed swaps are shielded from eviction (an epoch-stamped win, so
-/// squatting requires genuinely winning quotes every epoch, forever).
+/// @dev Default configs check standard (fee, tickSpacing) combos with hooks=address(0);
+/// they are always probed and may never occupy leaderboard slots. The leaderboard holds
+/// up to 8 registered pools per pair. Joining a non-full board is direct; a full board is
+/// contested through a PAIRWISE, POKEABLE CHALLENGE: the challenger names one incumbent
+/// slot as its target, both pools' active liquidity is sampled at declaration, at any
+/// point during the window (permissionless pokes), and once more at finalization, and
+/// each side's score is the MINIMUM of all its samples. The challenger evicts the named
+/// target only if its min strictly exceeds the target's. Min-scoring makes flash/JIT
+/// liquidity useless (a single low sample pins the score for the whole window) and makes
+/// late defense pointless (a min can never be raised), so winning a slot takes capital
+/// genuinely parked for the full CHALLENGE_DELAY. Slots that just changed hands are
+/// protected by a short cooldown (see SLOT_COOLDOWN).
 abstract contract V4PoolRegistry is OnchainRouterImmutables {
     using StateLibrary for IPoolManager;
     using PoolIdLibrary for PoolKey;
@@ -31,35 +36,78 @@ abstract contract V4PoolRegistry is OnchainRouterImmutables {
         uint24 fee;
         int24 tickSpacing;
         address hooks;
-        uint64 lastWinEpoch;
+        /// @dev Timestamp before which this SLOT cannot be named as a challenge target.
+        uint64 cooldownUntil;
+    }
+
+    /// @dev A pending pairwise challenge, keyed by (pair, challenger config). The two
+    /// mins start as the declaration-time samples and only ever decrease (via pokes and
+    /// the finalization sample).
+    struct V4Challenge {
+        uint64 startedAt;
+        uint24 targetFee;
+        int24 targetTickSpacing;
+        address targetHooks;
+        uint128 challengerMin;
+        uint128 targetMin;
     }
 
     uint8 constant MAX_V4_POOLS_PER_PAIR = 8;
     uint256 internal constant CHALLENGE_DELAY = 1 days;
     uint256 internal constant CHALLENGE_EXPIRY = 3 days;
-    uint256 internal constant WIN_EPOCH = 1 weeks;
+    /// @dev Quiet period stamped on a slot ONLY when its membership changes: a new entry
+    /// joining a non-full board via registerV4Pool, or a challenger taking the slot by
+    /// eviction. Deliberately NO cooldown after a failed or void challenge: if losing a
+    /// challenge protected the target, an incumbent could self-challenge with a dust
+    /// pool, lose on purpose, and repeat forever for permanent immunity. Failed
+    /// challenges cost incumbents nothing (defense is passive — the target's liquidity
+    /// is merely sampled, its LPs do nothing), so only membership changes need the
+    /// quiet period.
+    uint256 internal constant SLOT_COOLDOWN = 3 days;
 
     V4PoolConfig[] internal defaultV4Configs;
     mapping(bytes32 pairHash => V4PoolEntry[]) internal v4Leaderboard;
     /// @dev Challenges are keyed by (pair, challenger config), NOT one slot per pair:
     /// a single-slot design would let a griefer with any dust pool perpetually occupy
     /// the slot and make stale incumbents un-evictable. Concurrent challenges by
-    /// different challengers are independent.
-    mapping(bytes32 challengeId => uint64 startedAt) internal v4Challenges;
+    /// different challengers are independent, even against the same target (the first
+    /// finalized eviction wins; later ones void when the target is gone).
+    mapping(bytes32 challengeId => V4Challenge) internal v4Challenges;
 
     event V4PoolRegistered(bytes32 indexed pairHash, uint24 fee, int24 tickSpacing, address hooks);
-    event V4ChallengeStarted(bytes32 indexed pairHash, uint24 fee, int24 tickSpacing, address hooks, uint64 startedAt);
+    event V4ChallengeStarted(
+        bytes32 indexed pairHash,
+        uint24 challengerFee,
+        int24 challengerTickSpacing,
+        address challengerHooks,
+        uint24 targetFee,
+        int24 targetTickSpacing,
+        address targetHooks,
+        uint64 startedAt
+    );
+    event V4ChallengePoked(
+        bytes32 indexed pairHash,
+        uint24 challengerFee,
+        int24 challengerTickSpacing,
+        address challengerHooks,
+        uint128 challengerMin,
+        uint128 targetMin
+    );
     event V4ChallengeFinalized(bytes32 indexed pairHash, bool success);
     event V4PoolEvicted(bytes32 indexed pairHash, uint24 fee, int24 tickSpacing, address hooks);
 
     error PoolDoesNotExist();
+    error PoolHasNoLiquidity();
     error DuplicatePool();
     error BoardFull();
     error BoardNotFull();
-    error ChallengerHasNoLiquidity();
+    error DefaultConfigNotAllowed();
+    error TargetNotListed();
+    error SlotInCooldown();
     error ChallengePending();
     error NoChallenge();
     error ChallengeNotReady();
+    error ChallengeExpired();
 
     constructor() {
         defaultV4Configs.push(V4PoolConfig({fee: 100, tickSpacing: 1}));
@@ -69,139 +117,240 @@ abstract contract V4PoolRegistry is OnchainRouterImmutables {
     }
 
     /// @notice Register a V4 pool onto a NON-FULL leaderboard. Permissionless.
-    /// @dev Pool must exist (sqrtPriceX96 != 0). A full board cannot be joined directly;
-    /// use startV4Challenge / finalizeV4Challenge.
+    /// @dev Pool must exist AND have nonzero active liquidity (an initialized-but-empty
+    /// pool is not a routing candidate and must not squat a slot). Default configs are
+    /// rejected: they are probed unconditionally during discovery, so listing one would
+    /// waste a board slot. A full board cannot be joined directly; use startV4Challenge /
+    /// finalizeV4Challenge. The new slot starts in cooldown (membership change).
     function registerV4Pool(address tokenA, address tokenB, uint24 fee, int24 tickSpacing, address hooks) external {
+        if (hooks == address(0) && _isDefaultConfig(fee, tickSpacing)) revert DefaultConfigNotAllowed();
+
         PoolKey memory key = _buildPoolKey(tokenA, tokenB, fee, tickSpacing, hooks);
-        (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(key.toId());
+        PoolId poolId = key.toId();
+        (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(poolId);
         if (sqrtPriceX96 == 0) revert PoolDoesNotExist();
+        if (poolManager.getLiquidity(poolId) == 0) revert PoolHasNoLiquidity();
 
         bytes32 ph = _pairHash(tokenA, tokenB);
         V4PoolEntry[] storage entries = v4Leaderboard[ph];
         _checkNotListed(entries, fee, tickSpacing, hooks);
         if (entries.length >= MAX_V4_POOLS_PER_PAIR) revert BoardFull();
 
-        entries.push(V4PoolEntry({fee: fee, tickSpacing: tickSpacing, hooks: hooks, lastWinEpoch: 0}));
+        entries.push(
+            V4PoolEntry({
+                fee: fee,
+                tickSpacing: tickSpacing,
+                hooks: hooks,
+                cooldownUntil: uint64(block.timestamp + SLOT_COOLDOWN)
+            })
+        );
         emit V4PoolRegistered(ph, fee, tickSpacing, hooks);
     }
 
-    /// @notice Declare a challenge against a full leaderboard. Permissionless.
-    /// @dev The challenger pool must exist, be unlisted, and have nonzero active
-    /// liquidity NOW; the comparison that decides eviction happens at finalization,
-    /// CHALLENGE_DELAY later, so flash or short-lived (JIT) liquidity cannot win a slot.
-    /// Challenges are independent per challenger config; re-declaring the same challenge is
-    /// blocked until it expires so its clock cannot be reset.
-    function startV4Challenge(address tokenA, address tokenB, uint24 fee, int24 tickSpacing, address hooks) external {
+    /// @notice Declare a pairwise challenge against one named incumbent slot of a full
+    /// leaderboard. Permissionless.
+    /// @dev The challenger pool must exist, be unlisted, not be a default config, and
+    /// have nonzero active liquidity NOW. The named target must be listed and its slot
+    /// out of cooldown. Both pools are sampled immediately; the samples seed each side's
+    /// running MINIMUM, which pokes and the finalization sample can only lower. The
+    /// challenge is keyed by (pair, challenger config): re-declaring the same challenge
+    /// is blocked until it expires so its clock (and its recorded mins) cannot be reset.
+    function startV4Challenge(
+        address tokenA,
+        address tokenB,
+        uint24 challengerFee,
+        int24 challengerTickSpacing,
+        address challengerHooks,
+        uint24 targetFee,
+        int24 targetTickSpacing,
+        address targetHooks
+    ) external {
         bytes32 ph = _pairHash(tokenA, tokenB);
         V4PoolEntry[] storage entries = v4Leaderboard[ph];
         if (entries.length < MAX_V4_POOLS_PER_PAIR) revert BoardNotFull(); // not full: register directly
-        _checkNotListed(entries, fee, tickSpacing, hooks);
+        _checkNotListed(entries, challengerFee, challengerTickSpacing, challengerHooks);
+        if (challengerHooks == address(0) && _isDefaultConfig(challengerFee, challengerTickSpacing)) {
+            revert DefaultConfigNotAllowed();
+        }
 
-        // Re-declaring the same challenge would reset its clock; block until it expires
-        bytes32 challengeId = _challengeId(ph, fee, tickSpacing, hooks);
-        uint64 existing = v4Challenges[challengeId];
+        (bool listed, uint256 targetIdx) = _findEntry(entries, targetFee, targetTickSpacing, targetHooks);
+        if (!listed) revert TargetNotListed();
+        if (block.timestamp < entries[targetIdx].cooldownUntil) revert SlotInCooldown();
+
+        // Re-declaring the same challenge would reset its clock and mins; block until it expires
+        bytes32 challengeId = _challengeId(ph, challengerFee, challengerTickSpacing, challengerHooks);
+        uint64 existing = v4Challenges[challengeId].startedAt;
         if (existing != 0 && block.timestamp <= existing + CHALLENGE_EXPIRY) revert ChallengePending();
 
-        PoolKey memory key = _buildPoolKey(tokenA, tokenB, fee, tickSpacing, hooks);
-        PoolId poolId = key.toId();
-        (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(poolId);
+        PoolId challengerId = _buildPoolKey(tokenA, tokenB, challengerFee, challengerTickSpacing, challengerHooks).toId();
+        (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(challengerId);
         if (sqrtPriceX96 == 0) revert PoolDoesNotExist();
-        if (poolManager.getLiquidity(poolId) == 0) revert ChallengerHasNoLiquidity();
+        uint128 challengerLiquidity = poolManager.getLiquidity(challengerId);
+        if (challengerLiquidity == 0) revert PoolHasNoLiquidity();
 
-        v4Challenges[challengeId] = uint64(block.timestamp);
-        emit V4ChallengeStarted(ph, fee, tickSpacing, hooks, uint64(block.timestamp));
+        uint128 targetLiquidity =
+            poolManager.getLiquidity(_buildPoolKey(tokenA, tokenB, targetFee, targetTickSpacing, targetHooks).toId());
+
+        v4Challenges[challengeId] = V4Challenge({
+            startedAt: uint64(block.timestamp),
+            targetFee: targetFee,
+            targetTickSpacing: targetTickSpacing,
+            targetHooks: targetHooks,
+            challengerMin: challengerLiquidity,
+            targetMin: targetLiquidity
+        });
+        emit V4ChallengeStarted(
+            ph,
+            challengerFee,
+            challengerTickSpacing,
+            challengerHooks,
+            targetFee,
+            targetTickSpacing,
+            targetHooks,
+            uint64(block.timestamp)
+        );
+    }
+
+    /// @notice Sample both sides of a pending challenge and lower their stored minimums.
+    /// Callable by anyone, any number of times, while the challenge is live.
+    /// @dev A poke can only ever LOWER a side's score, never raise it. This is the teeth
+    /// of the mechanism: one poke while a challenger's flash/JIT liquidity is absent pins
+    /// its score near zero for the rest of the window, and one poke while a stale target
+    /// is empty makes topping it up before finalization pointless. Defenders and
+    /// challengers alike are expected to poke at moments favorable to them.
+    function pokeV4Challenge(address tokenA, address tokenB, uint24 fee, int24 tickSpacing, address hooks) external {
+        bytes32 ph = _pairHash(tokenA, tokenB);
+        V4Challenge storage challenge = v4Challenges[_challengeId(ph, fee, tickSpacing, hooks)];
+        uint64 startedAt = challenge.startedAt;
+        if (startedAt == 0) revert NoChallenge();
+        if (block.timestamp > startedAt + CHALLENGE_EXPIRY) revert ChallengeExpired();
+
+        (uint128 challengerMin, uint128 targetMin) = _sampleChallenge(challenge, tokenA, tokenB, fee, tickSpacing, hooks);
+        emit V4ChallengePoked(ph, fee, tickSpacing, hooks, challengerMin, targetMin);
     }
 
     /// @notice Finalize a matured challenge. Callable by anyone.
-    /// @dev Re-measures liquidity NOW. The eviction target is the lowest-liquidity
-    /// incumbent WITHOUT a routed-swap win in the current or previous epoch (recently
-    /// useful pools are shielded). The challenge succeeds only if the challenger's
-    /// current liquidity exceeds the target's; either way the challenge slot is freed.
-    /// A failed or expired challenge is simply discarded, never reverts, so a bogus
-    /// challenge cannot block the pair for longer than CHALLENGE_DELAY.
+    /// @dev Valid in [start+DELAY, start+EXPIRY]: takes one final min-sample of both
+    /// sides, deletes the challenge, then evicts the named target iff the challenger's
+    /// min STRICTLY exceeds the target's min. If the target already lost its slot to a
+    /// concurrently finalized challenge, the challenge is void (deleted, no eviction).
+    /// Past EXPIRY finalization just discards the stale challenge and reports failure,
+    /// never reverts, so an abandoned challenge cannot wedge its challenger config.
+    /// On eviction the challenger takes the slot and the slot enters cooldown
+    /// (membership change). A failed challenge stamps NO cooldown — see SLOT_COOLDOWN
+    /// for why that is load-bearing.
     function finalizeV4Challenge(address tokenA, address tokenB, uint24 fee, int24 tickSpacing, address hooks)
         external
         returns (bool success)
     {
         bytes32 ph = _pairHash(tokenA, tokenB);
         bytes32 challengeId = _challengeId(ph, fee, tickSpacing, hooks);
-        uint64 startedAt = v4Challenges[challengeId];
+        V4Challenge storage challenge = v4Challenges[challengeId];
+        uint64 startedAt = challenge.startedAt;
         if (startedAt == 0) revert NoChallenge();
         if (block.timestamp < startedAt + CHALLENGE_DELAY) revert ChallengeNotReady();
 
-        delete v4Challenges[challengeId];
-
         if (block.timestamp > startedAt + CHALLENGE_EXPIRY) {
+            delete v4Challenges[challengeId];
             emit V4ChallengeFinalized(ph, false);
             return false;
         }
 
-        success = _executeChallenge(ph, tokenA, tokenB, fee, tickSpacing, hooks);
+        (uint128 challengerMin, uint128 targetMin) = _sampleChallenge(challenge, tokenA, tokenB, fee, tickSpacing, hooks);
+        (uint24 targetFee, int24 targetTickSpacing, address targetHooks) =
+            (challenge.targetFee, challenge.targetTickSpacing, challenge.targetHooks);
+        delete v4Challenges[challengeId];
+
+        success = _executeEviction(
+            ph, fee, tickSpacing, hooks, targetFee, targetTickSpacing, targetHooks, challengerMin, targetMin
+        );
         emit V4ChallengeFinalized(ph, success);
     }
 
-    /// @notice Attempt the eviction a matured challenge asks for.
-    function _executeChallenge(bytes32 ph, address tokenA, address tokenB, uint24 fee, int24 tickSpacing, address hooks)
-        private
-        returns (bool)
-    {
+    /// @dev Evict the named target and seat the challenger, if the min-scores allow it.
+    function _executeEviction(
+        bytes32 ph,
+        uint24 fee,
+        int24 tickSpacing,
+        address hooks,
+        uint24 targetFee,
+        int24 targetTickSpacing,
+        address targetHooks,
+        uint128 challengerMin,
+        uint128 targetMin
+    ) private returns (bool) {
         V4PoolEntry[] storage entries = v4Leaderboard[ph];
 
-        // A concurrent challenge with the same config may have already listed the
-        // challenger; the board itself never shrinks, so fullness needs no re-check
-        for (uint256 i = 0; i < entries.length; i++) {
-            if (entries[i].fee == fee && entries[i].tickSpacing == tickSpacing && entries[i].hooks == hooks) {
-                return false;
-            }
-        }
+        // Void if the named target already lost its slot to a concurrently finalized
+        // challenge (first eviction wins). Also void, defensively, if the challenger
+        // is somehow already listed: the board must never hold duplicates.
+        (bool targetListed, uint256 targetIdx) = _findEntry(entries, targetFee, targetTickSpacing, targetHooks);
+        if (!targetListed) return false;
+        (bool challengerListed,) = _findEntry(entries, fee, tickSpacing, hooks);
+        if (challengerListed) return false;
 
-        (bool found, uint256 targetIdx, uint128 targetLiquidity) = _findEvictionTarget(entries, tokenA, tokenB);
-        // No target means every incumbent recently won a routed swap: the board is healthy
-        if (!found) return false;
+        // Strict inequality: a tie keeps the incumbent
+        if (challengerMin <= targetMin) return false;
 
-        uint128 challengerLiquidity =
-            poolManager.getLiquidity(_buildPoolKey(tokenA, tokenB, fee, tickSpacing, hooks).toId());
-        if (challengerLiquidity <= targetLiquidity) return false;
-
-        emit V4PoolEvicted(ph, entries[targetIdx].fee, entries[targetIdx].tickSpacing, entries[targetIdx].hooks);
-        entries[targetIdx] = V4PoolEntry({fee: fee, tickSpacing: tickSpacing, hooks: hooks, lastWinEpoch: 0});
+        emit V4PoolEvicted(ph, targetFee, targetTickSpacing, targetHooks);
+        entries[targetIdx] = V4PoolEntry({
+            fee: fee,
+            tickSpacing: tickSpacing,
+            hooks: hooks,
+            cooldownUntil: uint64(block.timestamp + SLOT_COOLDOWN)
+        });
         emit V4PoolRegistered(ph, fee, tickSpacing, hooks);
         return true;
+    }
+
+    /// @dev Sample the current active liquidity of both sides of a challenge and fold
+    /// each into its stored running minimum (min-update only; a sample can never raise
+    /// a score). Returns the updated mins.
+    function _sampleChallenge(
+        V4Challenge storage challenge,
+        address tokenA,
+        address tokenB,
+        uint24 fee,
+        int24 tickSpacing,
+        address hooks
+    ) private returns (uint128 challengerMin, uint128 targetMin) {
+        uint128 challengerLiquidity =
+            poolManager.getLiquidity(_buildPoolKey(tokenA, tokenB, fee, tickSpacing, hooks).toId());
+        challengerMin = challenge.challengerMin;
+        if (challengerLiquidity < challengerMin) {
+            challengerMin = challengerLiquidity;
+            challenge.challengerMin = challengerLiquidity;
+        }
+
+        uint128 targetLiquidity = poolManager.getLiquidity(
+            _buildPoolKey(tokenA, tokenB, challenge.targetFee, challenge.targetTickSpacing, challenge.targetHooks).toId()
+        );
+        targetMin = challenge.targetMin;
+        if (targetLiquidity < targetMin) {
+            targetMin = targetLiquidity;
+            challenge.targetMin = targetLiquidity;
+        }
     }
 
     function _challengeId(bytes32 ph, uint24 fee, int24 tickSpacing, address hooks) private pure returns (bytes32) {
         return keccak256(abi.encode(ph, fee, tickSpacing, hooks));
     }
 
-    /// @notice Pick the eviction target: lowest CURRENT liquidity among unshielded incumbents.
-    /// @dev Shield: a win in the current or previous epoch marks the pool as recently
-    /// useful; it cannot be evicted no matter how low its active-tick reading is.
-    function _findEvictionTarget(V4PoolEntry[] storage entries, address tokenA, address tokenB)
+    function _findEntry(V4PoolEntry[] storage entries, uint24 fee, int24 tickSpacing, address hooks)
         private
         view
-        returns (bool found, uint256 targetIdx, uint128 targetLiquidity)
+        returns (bool found, uint256 idx)
     {
-        uint64 currentEpoch = uint64(block.timestamp / WIN_EPOCH);
-        targetLiquidity = type(uint128).max;
         for (uint256 i = 0; i < entries.length; i++) {
-            if (entries[i].lastWinEpoch + 1 >= currentEpoch && entries[i].lastWinEpoch != 0) continue;
-            PoolKey memory incumbentKey =
-                _buildPoolKey(tokenA, tokenB, entries[i].fee, entries[i].tickSpacing, entries[i].hooks);
-            uint128 liquidity = poolManager.getLiquidity(incumbentKey.toId());
-            if (!found || liquidity < targetLiquidity) {
-                found = true;
-                targetIdx = i;
-                targetLiquidity = liquidity;
+            if (entries[i].fee == fee && entries[i].tickSpacing == tickSpacing && entries[i].hooks == hooks) {
+                return (true, i);
             }
         }
     }
 
     function _checkNotListed(V4PoolEntry[] storage entries, uint24 fee, int24 tickSpacing, address hooks) private view {
-        for (uint256 i = 0; i < entries.length; i++) {
-            if (entries[i].fee == fee && entries[i].tickSpacing == tickSpacing && entries[i].hooks == hooks) {
-                revert DuplicatePool();
-            }
-        }
+        (bool listed,) = _findEntry(entries, fee, tickSpacing, hooks);
+        if (listed) revert DuplicatePool();
     }
 
     /// @notice Finds all V4 pools for a token pair.
@@ -263,20 +412,6 @@ abstract contract V4PoolRegistry is OnchainRouterImmutables {
         }
 
         return count;
-    }
-
-    /// @notice Stamp a leaderboard entry as having won a routed swap this epoch.
-    /// @dev Skips the SSTORE when the entry is already stamped for the current epoch,
-    /// so the hot-path cost is one warm write per pool per epoch at most.
-    function _recordV4Win(bytes32 ph, uint24 fee, int24 tickSpacing, address hooks) internal {
-        V4PoolEntry[] storage entries = v4Leaderboard[ph];
-        uint64 currentEpoch = uint64(block.timestamp / WIN_EPOCH);
-        for (uint256 i = 0; i < entries.length; i++) {
-            if (entries[i].fee == fee && entries[i].tickSpacing == tickSpacing && entries[i].hooks == hooks) {
-                if (entries[i].lastWinEpoch != currentEpoch) entries[i].lastWinEpoch = currentEpoch;
-                return;
-            }
-        }
     }
 
     function _buildPoolKey(address tokenA, address tokenB, uint24 fee, int24 tickSpacing, address hooks)

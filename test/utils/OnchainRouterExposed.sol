@@ -50,9 +50,4 @@ contract OnchainRouterExposed is OnchainRouter {
     function externalV4QuoteExactOut(SwapHop memory swap) public view returns (uint256 amountIn) {
         amountIn = v4QuoteExactOut(swap);
     }
-
-    /// @dev stamps a leaderboard entry with an epoch win without executing a swap
-    function exposedRecordV4Win(address tokenA, address tokenB, uint24 fee, int24 tickSpacing, address hooks) public {
-        _recordV4Win(_pairHash(tokenA, tokenB), fee, tickSpacing, hooks);
-    }
 }
