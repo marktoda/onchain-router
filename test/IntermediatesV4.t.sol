@@ -71,6 +71,30 @@ contract IntermediatesV4Test is BaseForkFixture {
         );
     }
 
+    /// @notice The configured-intermediates fold must discover and execute a 2-hop route
+    /// whose hops are both V4 pools, reached only through an owner-added intermediate.
+    function test_routeExactInput_configuredIntermediate_acrossV4Hops() public {
+        SwapParams memory params =
+            SwapParams({amountSpecified: 100e18, tokenIn: address(tokenA), tokenOut: address(tokenB)});
+
+        // Default set (WETH only): unroutable, no tokenA/WETH or WETH/tokenB pools exist
+        Quote memory before = router.routeExactInput(params);
+        assertEq(before.amountOut, 0, "Pair must be unroutable via WETH alone");
+
+        router.addIntermediateToken(address(mid));
+        Quote memory quote = router.routeExactInput(params);
+        assertGt(quote.amountOut, 0, "Added intermediate must make the pair routable over V4");
+        assertEq(quote.path.length, 2, "Route must be 2-hop");
+        assertEq(quote.path[0].tokenOut, address(mid), "First hop must land on the added intermediate");
+        assertEq(uint256(quote.path[0].version), uint256(V4), "First hop must be a V4 pool");
+        assertEq(uint256(quote.path[1].version), uint256(V4), "Second hop must be a V4 pool");
+
+        // And the quoted route executes with exact delivery through the V4 unlock path
+        uint256 amountOut = router.swapExactInput(quote, recipient, block.timestamp, false);
+        assertEq(amountOut, quote.amountOut, "Quote/swap parity through the configured V4 intermediate");
+        assertEq(tokenB.balanceOf(recipient), amountOut, "Recipient must receive the V4 route's output");
+    }
+
     /// @notice Regression: a WETH-endpoint pair with no direct pool plus a configured
     /// intermediate whose WETH leg is unfillable. routeExactOutputMulti short-circuits to
     /// the internal {amountIn: uint256.max} sentinel and better() prefers that over the
