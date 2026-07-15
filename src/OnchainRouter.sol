@@ -111,11 +111,6 @@ contract OnchainRouter is
         revert IntermediateNotFound();
     }
 
-    /// @notice Number of configured routing intermediates.
-    function intermediateTokensLength() external view returns (uint256) {
-        return intermediateTokens.length;
-    }
-
     /// @notice The full routing-intermediate set, read atomically in one call so
     /// integrators get a consistent snapshot. Replaces a public per-index getter, which
     /// would cost contract-size headroom the router does not have (EIP-170) to duplicate.

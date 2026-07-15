@@ -118,7 +118,7 @@ contract IntermediatesTest is MainnetForkFixture {
     // ======== Admin: access control, cap, dedup ========
 
     function test_intermediates_initialSetIsWeth() public {
-        assertEq(router.intermediateTokensLength(), 1);
+        assertEq(router.getIntermediateTokens().length, 1);
         assertEq(router.getIntermediateTokens()[0], WETH);
     }
 
@@ -170,7 +170,7 @@ contract IntermediatesTest is MainnetForkFixture {
     function test_removeIntermediateToken_removesAndReverts() public {
         router.addIntermediateToken(USDC);
         router.removeIntermediateToken(USDC);
-        assertEq(router.intermediateTokensLength(), 1);
+        assertEq(router.getIntermediateTokens().length, 1);
         vm.expectRevert(OnchainRouter.IntermediateNotFound.selector);
         router.removeIntermediateToken(USDC);
     }
