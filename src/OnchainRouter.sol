@@ -368,6 +368,15 @@ contract OnchainRouter is
             if (intermediate == params.tokenIn || intermediate == params.tokenOut) continue;
             bestQuote = routeExactOutputMulti(params, intermediate).better(bestQuote);
         }
+        // The unfillable sentinel (amountIn == uint256.max, from an unfillable direct
+        // pool or routeExactOutputMulti's short-circuit) must not escape to callers:
+        // better() treats only amountIn == 0 as no-route, so when every candidate is
+        // empty or sentinel the fold settles on the sentinel itself. Normalize it to
+        // the canonical no-route quote {0, 0, empty path}.
+        if (bestQuote.amountIn == type(uint256).max) {
+            Quote memory empty;
+            bestQuote = empty;
+        }
     }
 
     function routeExactInputMulti(SwapParams memory params, address intermediate)
