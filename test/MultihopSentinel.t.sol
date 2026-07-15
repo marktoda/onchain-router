@@ -10,23 +10,8 @@ import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
 import {ModifyLiquidityParams} from "v4-core/src/types/PoolOperation.sol";
 import {SwapParams, Quote} from "../src/base/OnchainRouterStructs.sol";
 import {OnchainRouterExposed} from "./utils/OnchainRouterExposed.sol";
+import {MockV3Factory, MockV2Factory} from "./utils/MockFactories.sol";
 import {BaseForkFixture} from "./utils/ForkFixtures.sol";
-
-contract MHV3Factory {
-    function feeAmountTickSpacing(uint24) external pure returns (int24) {
-        return 0;
-    }
-
-    function getPool(address, address, uint24) external pure returns (address) {
-        return address(0);
-    }
-}
-
-contract MHV2Factory {
-    function getPair(address, address) external pure returns (address) {
-        return address(0);
-    }
-}
 
 /// @notice #10 regression: in a 2-hop exact-output route the first (output-side) leg can
 /// be unfillable and return the uint256.max sentinel. Feeding that forward as the next
@@ -46,7 +31,8 @@ contract MultihopSentinelTest is BaseForkFixture {
         _forkBase(32_000_000);
         manager = IPoolManager(POOL_MANAGER);
         lpRouter = new PoolModifyLiquidityTest(manager);
-        router = new OnchainRouterExposed(address(new MHV2Factory()), address(new MHV3Factory()), POOL_MANAGER, WETH);
+        router =
+            new OnchainRouterExposed(address(new MockV2Factory()), address(new MockV3Factory()), POOL_MANAGER, WETH);
 
         tokenIn = new MockERC20("IN", "IN", 18);
         mid = new MockERC20("MID", "MID", 18);
