@@ -85,6 +85,36 @@ contract IntermediatesTest is MainnetForkFixture {
         assertEq(best.amountOut, viaDeep.amountOut, "Fold must return the best candidate");
     }
 
+    /// @notice Exact-output analog: with a direct pool plus two configured intermediates
+    /// of different depth, the fold must return the candidate with the lowest amountIn.
+    function test_routeExactOutput_picksBestAmongMultipleCandidates() public {
+        MockERC20 x = new MockERC20("X", "X", 18);
+        MockERC20 y = new MockERC20("Y", "Y", 18);
+        MockERC20 deep = new MockERC20("DEEP", "DEEP", 18);
+        MockERC20 mid = new MockERC20("MID", "MID", 18);
+        // Direct x<->y: shallow (worst). Via mid: medium. Via deep: deepest (best).
+        _createPoolLiq(address(x), address(y), 1e20);
+        _createPoolLiq(address(x), address(mid), 5e21);
+        _createPoolLiq(address(mid), address(y), 5e21);
+        _createPoolLiq(address(x), address(deep), 5e23);
+        _createPoolLiq(address(deep), address(y), 5e23);
+        router.addIntermediateToken(address(mid));
+        router.addIntermediateToken(address(deep));
+
+        SwapParams memory params = SwapParams({amountSpecified: 20e18, tokenIn: address(x), tokenOut: address(y)});
+        Quote memory best = router.routeExactOutput(params);
+
+        Quote memory viaDeep = router.externalRouteExactOutputMulti(params, address(deep));
+        Quote memory viaMid = router.externalRouteExactOutputMulti(params, address(mid));
+        Quote memory direct = router.externalRouteExactOutputSingle(params);
+
+        // The deepest path should demand the least input, and the fold must return exactly it
+        assertGt(viaDeep.amountIn, 0, "Deep path must be a real quote (test premise)");
+        assertLt(viaDeep.amountIn, viaMid.amountIn, "deep path should under-quote mid (test premise)");
+        assertLt(viaDeep.amountIn, direct.amountIn, "deep path should under-quote the shallow direct pool");
+        assertEq(best.amountIn, viaDeep.amountIn, "Fold must return the best candidate");
+    }
+
     // ======== Admin: access control, cap, dedup ========
 
     function test_intermediates_initialSetIsWeth() public {
