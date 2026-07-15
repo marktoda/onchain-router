@@ -16,6 +16,10 @@ import {SwapHop} from "./base/OnchainRouterStructs.sol";
 abstract contract V4Quoter is OnchainRouterImmutables {
     using PoolIdLibrary for PoolKey;
 
+    /// @dev Thrown when an exact-output quote cannot fully fill from the pool's liquidity.
+    /// Caught by v4QuoteExactOut and converted to the unfillable sentinel.
+    error V4PartialFill();
+
     function v4QuoteExactIn(SwapHop memory swap) internal view returns (uint256 amountOut) {
         try this._v4QuoteExactIn{gas: 500_000}(swap) returns (uint256 _amountOut) {
             amountOut = _amountOut;
@@ -62,6 +66,14 @@ abstract contract V4Quoter is OnchainRouterImmutables {
 
         (int256 amount0, int256 amount1,,) =
             V4QuoterMath.quote(poolManager, key.toId(), key.tickSpacing, int256(swap.amountSpecified), quoteParams);
+
+        // Full-fill check, mirroring V3 (SwapExecutor.V3InvalidAmountOut). The V4 loop
+        // exits when the pool is exhausted, leaving a partial fill that would otherwise
+        // quote an artificially low amountIn, win better(), then under-deliver at
+        // execution. Reverting here is caught by v4QuoteExactOut and surfaces the
+        // type(uint256).max "unfillable" sentinel, so the pool loses the route.
+        uint256 delivered = uint256(zeroForOne ? amount1 : amount0);
+        if (delivered != swap.amountSpecified) revert V4PartialFill();
 
         amountIn = zeroForOne ? uint256(-amount0) : uint256(-amount1);
     }

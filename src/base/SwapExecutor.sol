@@ -40,6 +40,7 @@ abstract contract SwapExecutor is OnchainRouterImmutables, IUnlockCallback {
     error V4TooMuchRequested();
     error TooLittleReceived();
     error V3InvalidAmountOut();
+    error V4InvalidAmountOut();
     error V3InvalidCaller();
     error V4InvalidCaller();
 
@@ -234,6 +235,9 @@ abstract contract SwapExecutor is OnchainRouterImmutables, IUnlockCallback {
 
         // Take output
         uint256 outputAmount = uint256(uint128(zeroForOne ? delta1 : delta0));
+        // Full-fill check, mirroring V3 (V3InvalidAmountOut): a V4 pool can partial-fill
+        // an exact-output swap when its liquidity is exhausted before the target output.
+        if (outputAmount != amountOut) revert V4InvalidAmountOut();
         poolManager.take(outputCurrency, recipient, outputAmount);
 
         // Post-take: wrap ETH→WETH if recipient is this contract and output is native ETH

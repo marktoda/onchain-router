@@ -306,6 +306,13 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter,
         Quote memory outputToIntermediate = routeExactOutputSingle(
             SwapParams({tokenIn: intermediate, tokenOut: params.tokenOut, amountSpecified: params.amountSpecified})
         );
+        // Short-circuit an unfillable first leg: feeding the uint256.max sentinel forward
+        // as the next leg's amountSpecified would wrap through int256() to -1 and quote a
+        // bogus ~1-wei "winning" route. Return the sentinel so this route loses better().
+        if (outputToIntermediate.amountIn == 0 || outputToIntermediate.amountIn == type(uint256).max) {
+            bestQuote.amountIn = type(uint256).max;
+            return bestQuote;
+        }
         Quote memory intermediateToInput = routeExactOutputSingle(
             SwapParams({
                 tokenIn: params.tokenIn, tokenOut: intermediate, amountSpecified: outputToIntermediate.amountIn
