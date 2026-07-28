@@ -5,6 +5,7 @@ import {Test, console} from "forge-std/Test.sol";
 import {IUniswapV3Factory} from "v3-core/contracts/interfaces/IUniswapV3Factory.sol";
 import {IUniswapV2Factory} from "v2-core/contracts/interfaces/IUniswapV2Factory.sol";
 import {OnchainRouter} from "../src/OnchainRouter.sol";
+import {PathGenerator} from "../src/base/PathGenerator.sol";
 import {SwapParams, Quote} from "../src/base/OnchainRouterStructs.sol";
 import {OnchainRouterExposed} from "./utils/OnchainRouterExposed.sol";
 import {ERC20} from "solmate/src/tokens/ERC20.sol";
@@ -62,7 +63,7 @@ contract RouterForkTest is Test {
 
     function test_addNewFeeTier_fails_whenNotEnabled() public {
         uint24 invalidFeeTier = 123412;
-        vm.expectRevert(bytes("Invalid fee tier"));
+        vm.expectRevert(PathGenerator.InvalidFeeTier.selector);
         router.addNewFeeTier(invalidFeeTier);
     }
 

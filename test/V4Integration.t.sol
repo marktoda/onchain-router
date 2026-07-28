@@ -3,9 +3,11 @@ pragma solidity ^0.8.0;
 
 import {Test, console} from "forge-std/Test.sol";
 import {OnchainRouter} from "../src/OnchainRouter.sol";
+import {SwapExecutor} from "../src/base/SwapExecutor.sol";
 import {SwapParams, Pool, Quote, V2, V3, V4} from "../src/base/OnchainRouterStructs.sol";
 import {OnchainRouterExposed} from "./utils/OnchainRouterExposed.sol";
 import {ERC20} from "solmate/src/tokens/ERC20.sol";
+import {hasV4Hop} from "./utils/ForkFixtures.sol";
 import {IWETH9} from "../src/interfaces/IWETH9.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
@@ -46,7 +48,10 @@ contract V4BaseForkTest is Test {
 
     function setUp() public {
         string memory rpc = vm.envString("BASE_RPC_URL");
-        vm.createSelectFork(rpc);
+        // Pinned for deterministic CI: an unpinned fork made results depend on live Base
+        // state at run time, so a swap could pass locally and revert in CI at a different
+        // block. 32_000_000 matches the other Base-fork suites.
+        vm.createSelectFork(rpc, 32_000_000);
 
         router = new OnchainRouterExposed(V2_FACTORY, V3_FACTORY, POOL_MANAGER, WETH);
         recipient = makeAddr("recipient");
@@ -205,6 +210,48 @@ contract V4BaseForkTest is Test {
         uint256 amountOut = router.swapExactInput(quote, recipient, block.timestamp, true);
         assertGt(amountOut, 0, "Should receive output");
         assertEq(recipient.balance - ethBefore, amountOut, "Recipient should receive ETH");
+    }
+
+    // ======== V4 caller-supplied bounds (hardening) ========
+
+    function test_v4SwapExactInput_minAmountOut_bounds() public {
+        vm.skip(!v4WethUsdcExists && !v4NativeEthUsdcExists);
+
+        SwapParams memory params = SwapParams({amountSpecified: ETH_AMOUNT, tokenIn: WETH, tokenOut: USDC});
+        Quote memory quote = router.routeExactInput(params);
+        // Early return, not vm.skip: Foundry forbids skipping after state-changing calls,
+        // and whether V4 wins this live route is only known after quoting
+        if (!hasV4Hop(quote)) return;
+
+        // Unmet bound must revert inside the V4 unlock path
+        vm.expectRevert(SwapExecutor.TooLittleReceived.selector);
+        router.swapExactInput{value: ETH_AMOUNT}(quote, recipient, block.timestamp, false, quote.amountOut + 1);
+
+        // Loose caller bound must dominate an inflated quote.amountOut
+        uint256 quotedOut = quote.amountOut;
+        quote.amountOut = quotedOut * 2;
+        uint256 minAmountOut = (quotedOut * 99) / 100;
+        uint256 amountOut =
+            router.swapExactInput{value: ETH_AMOUNT}(quote, recipient, block.timestamp, false, minAmountOut);
+        assertGe(amountOut, minAmountOut, "Realized output should meet the caller bound");
+    }
+
+    function test_v4SwapExactOutput_maxAmountIn_bounds() public {
+        vm.skip(!v4WethUsdcExists && !v4NativeEthUsdcExists);
+
+        SwapParams memory params = SwapParams({amountSpecified: USDC_AMOUNT, tokenIn: WETH, tokenOut: USDC});
+        Quote memory quote = router.routeExactOutput(params);
+        // Early return, not vm.skip: see exact-in variant
+        if (!hasV4Hop(quote)) return;
+
+        uint256 maxAmountIn = (quote.amountIn * 101) / 100;
+        uint256 balanceBefore = address(this).balance;
+        uint256 amountIn =
+            router.swapExactOutput{value: maxAmountIn}(quote, recipient, block.timestamp, false, maxAmountIn);
+
+        assertEq(ERC20(USDC).balanceOf(recipient), USDC_AMOUNT, "Recipient should receive exact USDC");
+        assertLe(amountIn, maxAmountIn, "Actual input should not exceed the caller bound");
+        assertEq(address(this).balance, balanceBefore - amountIn, "Unspent ETH must come back to the caller");
     }
 
     // ======== V4 Multi-hop (mixed V3→V4 or V4→V3) ========

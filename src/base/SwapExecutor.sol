@@ -40,6 +40,9 @@ abstract contract SwapExecutor is OnchainRouterImmutables, IUnlockCallback {
     error V4TooMuchRequested();
     error TooLittleReceived();
     error V3InvalidAmountOut();
+    error V4InvalidAmountOut();
+    error V3IncompleteInput();
+    error V4IncompleteInput();
     error V3InvalidCaller();
     error V4InvalidCaller();
 
@@ -63,7 +66,7 @@ abstract contract SwapExecutor is OnchainRouterImmutables, IUnlockCallback {
             address currentRecipient = i < quote.path.length - 1 ? address(this) : recipient;
 
             if (pool.version == V3) {
-                amountIn = _v3SwapExactInput(quote, amountIn, currentRecipient, i);
+                amountIn = _v3SwapExactInput(quote, amountIn, currentRecipient, i, i > 0);
             } else if (pool.version == V2) {
                 amountIn = _v2SwapExactInput(pool, amountIn, currentRecipient);
             }
@@ -76,6 +79,11 @@ abstract contract SwapExecutor is OnchainRouterImmutables, IUnlockCallback {
     //  Exact Output
     // ─────────────────────────────────────────────────────────────
 
+    /// @dev CAUTION: for multihop paths the returned amountIn is the LAST hop's input,
+    /// denominated in that hop's input token (the intermediate), NOT the caller's input
+    /// token. Earlier hops' inputs are paid inside callbacks/recursion and are not
+    /// aggregated here. Do not use this return value for user-facing accounting; derive
+    /// realized input from a balance delta instead (see OnchainRouter).
     function _swapExactOutput(Quote memory quote, address recipient) internal returns (uint256 amountIn) {
         if (_hasV4Hop(quote)) {
             bytes memory result = poolManager.unlock(abi.encode(quote, recipient, false));
@@ -126,9 +134,9 @@ abstract contract SwapExecutor is OnchainRouterImmutables, IUnlockCallback {
             address currentRecipient = i < quote.path.length - 1 ? address(this) : recipient;
 
             if (pool.version == V4) {
-                amountIn = _v4SwapExactInput(pool, amountIn, currentRecipient, i < quote.path.length - 1);
+                amountIn = _v4SwapExactInput(pool, amountIn, currentRecipient, i < quote.path.length - 1, i > 0);
             } else if (pool.version == V3) {
-                amountIn = _v3SwapExactInput(quote, amountIn, currentRecipient, i);
+                amountIn = _v3SwapExactInput(quote, amountIn, currentRecipient, i, i > 0);
             } else if (pool.version == V2) {
                 amountIn = _v2SwapExactInput(pool, amountIn, currentRecipient);
             }
@@ -141,20 +149,18 @@ abstract contract SwapExecutor is OnchainRouterImmutables, IUnlockCallback {
     //  V4 Swap Execution
     // ─────────────────────────────────────────────────────────────
 
-    function _v4SwapExactInput(Pool memory pool, uint256 amountIn, address recipient, bool isIntermediate)
-        private
-        returns (uint256 amountOut)
-    {
+    function _v4SwapExactInput(
+        Pool memory pool,
+        uint256 amountIn,
+        address recipient,
+        bool isIntermediate,
+        bool requireFullInput
+    ) private returns (uint256 amountOut) {
         address weth = intermediateToken;
         PoolKey memory key = pool.key;
         bool zeroForOne = Currency.wrap(pool.tokenIn) < Currency.wrap(pool.tokenOut);
         Currency inputCurrency = Currency.wrap(pool.tokenIn);
         Currency outputCurrency = Currency.wrap(pool.tokenOut);
-
-        // Pre-swap: unwrap WETH→ETH if V4 pool uses native ETH for input
-        if (inputCurrency.isAddressZero()) {
-            IWETH9(weth).withdraw(amountIn);
-        }
 
         // V4 convention: negative amountSpecified = exact input
         BalanceDelta delta = poolManager.swap(
@@ -173,14 +179,43 @@ abstract contract SwapExecutor is OnchainRouterImmutables, IUnlockCallback {
 
         // Settle input (negative delta = we owe pool manager)
         uint256 inputAmount = uint256(uint128(zeroForOne ? -delta0 : -delta1));
+
+        // A hop can consume less than it was funded when the pool's liquidity in this
+        // direction is exhausted before the full amount. On a NON-FIRST hop the remainder is
+        // an intermediate token that no refund path can see (the refund in OnchainRouter is
+        // denominated in the caller's input token), so it would strand here, and under a
+        // loose minAmountOut the terminal TooLittleReceived check does not fire either: the
+        // swap "succeeds" while the caller silently loses that value. Reject those rather
+        // than add per-token refund accounting, mirroring V4InvalidAmountOut on the
+        // exact-output side.
+        //
+        // The FIRST hop is deliberately exempt. Its remainder is the caller's own input
+        // token, which OnchainRouter measures by balance delta and returns, so nothing
+        // strands and there is no silent loss. Enforcing here as well would delete a working
+        // best-effort-fill-plus-refund path for loose-bound callers without closing anything.
+        if (requireFullInput && inputAmount != amountIn) revert V4IncompleteInput();
+
+        // Pre-settle: unwrap WETH→ETH if the V4 pool uses native ETH for input, for
+        // exactly the consumed amount (mirrors the exact-output hop). Unwrapping the
+        // full funded amountIn would strand the unconsumed remainder as native ETH on
+        // a partial fill, invisible to the WETH-denominated refund in OnchainRouter.
+        if (inputCurrency.isAddressZero()) {
+            IWETH9(weth).withdraw(inputAmount);
+        }
         _v4Settle(inputCurrency, inputAmount);
 
         // Take output (positive delta = pool manager owes us)
         amountOut = uint256(uint128(zeroForOne ? delta1 : delta0));
         poolManager.take(outputCurrency, isIntermediate ? address(this) : recipient, amountOut);
 
-        // Post-swap: wrap ETH→WETH if output is native ETH and we need ERC20 for next hop
-        if (outputCurrency.isAddressZero() && isIntermediate) {
+        // Post-swap: wrap ETH→WETH whenever the ROUTER itself holds the output, matching the
+        // exact-output hop's condition. Keying on isIntermediate alone missed the final-hop
+        // case where the router is the recipient because unwrapOutput=true: the router kept
+        // raw ETH and OnchainRouter's immediate WETH.withdraw(amountOut) then
+        // underflow-reverted, so exact-input reverted on a route the exact-output twin
+        // handled. recipient == address(this) subsumes the intermediate case, since every
+        // non-final hop is already passed address(this) as its recipient.
+        if (outputCurrency.isAddressZero() && recipient == address(this)) {
             IWETH9(weth).deposit{value: amountOut}();
         }
     }
@@ -229,6 +264,9 @@ abstract contract SwapExecutor is OnchainRouterImmutables, IUnlockCallback {
 
         // Take output
         uint256 outputAmount = uint256(uint128(zeroForOne ? delta1 : delta0));
+        // Full-fill check, mirroring V3 (V3InvalidAmountOut): a V4 pool can partial-fill
+        // an exact-output swap when its liquidity is exhausted before the target output.
+        if (outputAmount != amountOut) revert V4InvalidAmountOut();
         poolManager.take(outputCurrency, recipient, outputAmount);
 
         // Post-take: wrap ETH→WETH if recipient is this contract and output is native ETH
@@ -279,10 +317,13 @@ abstract contract SwapExecutor is OnchainRouterImmutables, IUnlockCallback {
     //  V3 Swap Execution
     // ─────────────────────────────────────────────────────────────
 
-    function _v3SwapExactInput(Quote memory quote, uint256 amountIn, address recipient, uint256 pathIndex)
-        private
-        returns (uint256 amountOut)
-    {
+    function _v3SwapExactInput(
+        Quote memory quote,
+        uint256 amountIn,
+        address recipient,
+        uint256 pathIndex,
+        bool requireFullInput
+    ) private returns (uint256 amountOut) {
         Pool memory pool = quote.path[pathIndex];
         bool zeroForOne = pool.tokenIn < pool.tokenOut;
         (int256 amount0Delta, int256 amount1Delta) = IUniswapV3Pool(pool.pool)
@@ -293,6 +334,13 @@ abstract contract SwapExecutor is OnchainRouterImmutables, IUnlockCallback {
                 (zeroForOne ? MIN_SQRT_RATIO + 1 : MAX_SQRT_RATIO - 1),
                 abi.encode(quote, pathIndex, true)
             );
+
+        // Symmetric with the V4 hop: a V3 pool whose liquidity is exhausted stops at the price
+        // limit and consumes less than requested. See _v4SwapExactInput for why this is
+        // rejected on non-first hops and deliberately allowed on the first.
+        if (requireFullInput && uint256(zeroForOne ? amount0Delta : amount1Delta) != amountIn) {
+            revert V3IncompleteInput();
+        }
 
         amountOut = zeroForOne ? uint256(-amount1Delta) : uint256(-amount0Delta);
     }
