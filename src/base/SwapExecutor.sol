@@ -352,7 +352,15 @@ abstract contract SwapExecutor is OnchainRouterImmutables, IUnlockCallback {
 
         Pool memory pool = quote.path[pathIndex];
 
-        if (pool.pool != msg.sender) revert V3InvalidCaller();
+        // `pool` is decoded from caller-supplied `data`, so comparing pool.pool against
+        // msg.sender would be circular: an attacker naming their own address passes the
+        // check and can then direct a transfer of any token this contract holds, from an
+        // EOA, with no swap in progress (this callback is external and necessarily outside
+        // the nonReentrant guard, since real pools must reach it mid-swap). Derive the
+        // expected pool from the factory instead — authoritative and independent of
+        // calldata. getPool rather than PoolAddress.computeAddress so this does not depend
+        // on a chain-specific init-code hash; matches how PathGenerator derives pools.
+        if (v3Factory.getPool(pool.tokenIn, pool.tokenOut, pool.fee) != msg.sender) revert V3InvalidCaller();
         (uint256 amountToPay) = amount0Delta > 0 ? (uint256(amount0Delta)) : (uint256(amount1Delta));
 
         if (isExactInput) {
