@@ -121,7 +121,7 @@ GPL-2.0-or-later
 
 ## Quoting guarantees and limits
 
-The view quoters are held to bit-for-bit parity with execution on V2, V3, and V4 core pool math (see `test/QuoteSwapParity.t.sol`, `test/SeededV3Parity.t.sol`, `test/SeededV4Parity.t.sol`): what `routeExact*` quotes is exactly what `swapExact*` delivers in the same state. V4 protocol fees are included and covered by tests; dynamic-fee pools quote against their live slot0 fee by construction (a dedicated dynamic-fee parity test is a tracked follow-up).
+The view quoters are held to bit-for-bit parity with execution on V2, V3, and V4 core pool math (see `test/QuoteSwapParity.t.sol`, `test/SeededV3Parity.t.sol`, `test/SeededV4Parity.t.sol`): what `routeExact*` quotes is exactly what `swapExact*` delivers in the same state. V4 protocol fees are included and covered by tests, and dynamic-fee pools quote against their live slot0 fee, covered by `test/DynamicFeeParity.t.sol`. Per-swap LP-fee overrides returned from a hook's `beforeSwap` are out of scope: they never reach slot0 before the quote reads them, so on those pools the caller's bound is the only protection.
 
 Known limits integrators should design around:
 

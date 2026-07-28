@@ -18,8 +18,14 @@ import {SwapHop} from "./base/OnchainRouterStructs.sol";
 /// change amounts (beforeSwap deltas, LP-fee overrides, custom curves) will quote
 /// differently than it executes, and under the exact-bound design such swaps revert
 /// rather than settle at an unquoted price. Integrators routing hooked pools must
-/// supply their own bounds. Protocol fees and initialized dynamic LP fees ARE covered
-/// (read from slot0; see V4QuoterMath).
+/// supply their own bounds. Protocol fees are covered. Dynamic LP fees are covered when set
+/// OUT-OF-BAND (updateDynamicLPFee in its own transaction), because the effective fee is read
+/// live from slot0 rather than from key.fee's 0x800000 sentinel (see V4QuoterMath); verified
+/// by test/DynamicFeeParity.t.sol. NOT covered: a per-swap lpFeeOverride returned by a hook's
+/// beforeSwap, which never reaches slot0 before the quote reads it and can be up to
+/// LPFeeLibrary.MAX_LP_FEE (100%). Such pools ARE reachable through discovery, because the
+/// registry rejects only custom-accounting (*_RETURNS_DELTA) hooks and not observer hooks, so
+/// on those the caller's bound is the only protection against the divergence.
 abstract contract V4Quoter is OnchainRouterImmutables {
     using PoolIdLibrary for PoolKey;
 
