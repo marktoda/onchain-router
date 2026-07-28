@@ -14,6 +14,18 @@ import {SwapHop} from "./base/OnchainRouterStructs.sol";
 /// @notice Simulates V4 swaps offchain by reading pool state via StateLibrary (extsload).
 /// @dev Uses try/catch with 500K gas limit to safely handle pools with extreme tick depth.
 /// Returns 0 (exact-in) or type(uint256).max (exact-out) on failure.
+///
+/// HOOK-UNAWARE BY DESIGN: quotes simulate core pool math only. A pool whose hooks
+/// change amounts (beforeSwap deltas, LP-fee overrides, custom curves) will quote
+/// differently than it executes, and under the exact-bound design such swaps revert
+/// rather than settle at an unquoted price. Integrators routing hooked pools must
+/// supply their own bounds. Protocol fees are covered. Dynamic LP fees are covered when set
+/// OUT-OF-BAND (updateDynamicLPFee in its own transaction), because the effective fee is read
+/// live from slot0 rather than from key.fee's 0x800000 sentinel (see V4QuoterMath); verified
+/// by test/DynamicFeeParity.t.sol. NOT covered: a per-swap lpFeeOverride returned by a hook's
+/// beforeSwap, which never reaches slot0 before the quote reads it and can be up to
+/// LPFeeLibrary.MAX_LP_FEE (100%). A pool with a beforeSwap hook can reach discovery via the
+/// leaderboard, so on those the caller's bound is the only protection against the divergence.
 abstract contract V4Quoter is OnchainRouterImmutables {
     using PoolIdLibrary for PoolKey;
     /// @dev Narrowing the caller-supplied amount to int256 is unreachable in practice (it

@@ -118,3 +118,13 @@ MAINNET_RPC_URL=... BASE_RPC_URL=... forge test
 ## License
 
 GPL-2.0-or-later
+
+## Quoting guarantees and limits
+
+The view quoters are held to bit-for-bit parity with execution on V2, V3, and V4 core pool math (see `test/QuoteSwapParity.t.sol`, `test/SeededV3Parity.t.sol`, `test/SeededV4Parity.t.sol`): what `routeExact*` quotes is exactly what `swapExact*` delivers in the same state. V4 protocol fees are included and covered by tests, and dynamic-fee pools quote against their live slot0 fee, covered by `test/DynamicFeeParity.t.sol`. Per-swap LP-fee overrides returned from a hook's `beforeSwap` are out of scope: they never reach slot0 before the quote reads them, so on those pools the caller's bound is the only protection.
+
+Known limits integrators should design around:
+
+- **Hooked V4 pools are quoted hook-unaware.** Hooks that change amounts (beforeSwap deltas, LP-fee overrides, custom curves) will quote differently than they execute; under the exact-bound design those swaps revert instead of settling at an unquoted price. Supply explicit bounds when routing hooked pools.
+- **Quoter gas budget.** Each pool quote runs under a 500k gas cap. A pool too tick-dense to quote within budget returns a sentinel (0 for exact-in, `type(uint256).max` for exact-out). A sentinel pool never beats a healthy candidate in single-hop route selection, but when it is the only candidate the returned quote still carries its path together with the sentinel amounts — gate on `amountOut == 0` / `amountIn == type(uint256).max` before executing, not on `path.length` (executing such an exact-in quote via the 4-arg `swapExactInput` would run with a zero minimum-output bound). See `test/GasCapSentinel.t.sol`. In multihop exact-output the sentinel is short-circuited so it cannot become a wrapped winning quote (see `test/MultihopSentinel.t.sol`).
+- **Exact-output beyond pool depth** is unroutable by quote: the quoters' full-fill checks surface the `type(uint256).max` sentinel instead of a partial-fill quote; treat `type(uint256).max` as unroutable.
