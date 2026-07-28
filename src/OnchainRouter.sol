@@ -82,7 +82,11 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter,
     /// never a re-fetched quote. A zero minAmountOut would silently disable slippage
     /// protection, so it falls back to the quote's zero-tolerance behavior instead.
     /// @param minAmountOut Minimum acceptable output; the swap reverts with TooLittleReceived
-    /// below it. Pass 0 to default to quote.amountOut (zero tolerance)
+    /// below it. Pass 0 to default to quote.amountOut (zero tolerance).
+    /// NOTE: the zero-fallback catches an uninitialized argument, it is NOT a security
+    /// boundary: minAmountOut = 1 is honored and is equivalent to no slippage protection.
+    /// Callers own the bound; a loose bound is the only condition under which a hooked pool's
+    /// unquoted price or any other quote-vs-execution divergence can go unnoticed.
     function swapExactInput(
         Quote memory quote,
         address recipient,
@@ -172,7 +176,9 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter,
     /// against realized input, never a re-fetched quote. A zero maxAmountIn would fund
     /// nothing and always revert, so it falls back to the quote's zero-tolerance behavior.
     /// @param maxAmountIn Maximum acceptable input; the swap reverts with *TooMuchRequested
-    /// above it. Pass 0 to default to quote.amountIn (zero tolerance)
+    /// above it. Pass 0 to default to quote.amountIn (zero tolerance).
+    /// NOTE: as with minAmountOut, the zero-fallback catches an uninitialized argument and is
+    /// NOT a security boundary: maxAmountIn = type(uint256).max is honored.
     function swapExactOutput(
         Quote memory quote,
         address recipient,
