@@ -41,6 +41,8 @@ abstract contract SwapExecutor is OnchainRouterImmutables, IUnlockCallback {
     error TooLittleReceived();
     error V3InvalidAmountOut();
     error V4InvalidAmountOut();
+    error V3IncompleteInput();
+    error V4IncompleteInput();
     error V3InvalidCaller();
     error V4InvalidCaller();
 
@@ -175,6 +177,18 @@ abstract contract SwapExecutor is OnchainRouterImmutables, IUnlockCallback {
         // Settle input (negative delta = we owe pool manager)
         uint256 inputAmount = uint256(uint128(zeroForOne ? -delta0 : -delta1));
 
+        // A hop can consume less than it was funded when the pool's liquidity in this
+        // direction is exhausted before the full amount. Reject rather than proceed: on a
+        // non-first hop the remainder is an intermediate token that no refund path can see
+        // (the refund in OnchainRouter is denominated in the caller's input token), so it
+        // strands here, and under a loose minAmountOut the terminal TooLittleReceived
+        // check does not fire, so the swap "succeeds" while the caller silently loses that
+        // value. Enforced on EVERY hop rather than only later ones: exempting the first hop
+        // would mean a drained pool partial-fills when routed directly but reverts when
+        // routed as hop two, and "exact input" should not quietly become "some of the
+        // input" on either shape. Mirrors V4InvalidAmountOut on the exact-output side.
+        if (inputAmount != amountIn) revert V4IncompleteInput();
+
         // Pre-settle: unwrap WETH→ETH if the V4 pool uses native ETH for input, for
         // exactly the consumed amount (mirrors the exact-output hop). Unwrapping the
         // full funded amountIn would strand the unconsumed remainder as native ETH on
@@ -305,6 +319,11 @@ abstract contract SwapExecutor is OnchainRouterImmutables, IUnlockCallback {
                 (zeroForOne ? MIN_SQRT_RATIO + 1 : MAX_SQRT_RATIO - 1),
                 abi.encode(quote, pathIndex, true)
             );
+
+        // Symmetric with the V4 hop: a V3 pool whose liquidity is exhausted stops at the
+        // price limit and consumes less than requested. See _v4SwapExactInput for why this
+        // is rejected on every hop rather than refunded.
+        if (uint256(zeroForOne ? amount0Delta : amount1Delta) != amountIn) revert V3IncompleteInput();
 
         amountOut = zeroForOne ? uint256(-amount1Delta) : uint256(-amount0Delta);
     }
