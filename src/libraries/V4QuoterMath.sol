@@ -7,6 +7,7 @@ import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
 import {SwapMath} from "v4-core/src/libraries/SwapMath.sol";
 import {TickMath} from "v4-core/src/libraries/TickMath.sol";
 import {SafeCast} from "v4-core/src/libraries/SafeCast.sol";
+import {ProtocolFeeLibrary} from "v4-core/src/libraries/ProtocolFeeLibrary.sol";
 import {V4PoolTickBitmap} from "./V4PoolTickBitmap.sol";
 
 /// @title V4 Quoter Math
@@ -15,6 +16,8 @@ library V4QuoterMath {
     using StateLibrary for IPoolManager;
     using SafeCast for uint256;
     using SafeCast for int256;
+    using ProtocolFeeLibrary for uint24;
+    using ProtocolFeeLibrary for uint16;
 
     struct QuoteParams {
         bool zeroForOne;
@@ -68,7 +71,7 @@ library V4QuoterMath {
 
         SwapState memory state;
         {
-            (uint160 sqrtPriceX96, int24 tick,,) = ctx.manager.getSlot0(ctx.poolId);
+            (uint160 sqrtPriceX96, int24 tick, uint24 protocolFee, uint24 lpFee) = ctx.manager.getSlot0(ctx.poolId);
             uint128 liquidity = ctx.manager.getLiquidity(ctx.poolId);
             state = SwapState({
                 amountSpecifiedRemaining: amount,
@@ -77,6 +80,18 @@ library V4QuoterMath {
                 tick: tick,
                 liquidity: liquidity
             });
+
+            // Mirror Pool.swap's fee composition instead of trusting the caller's key.fee:
+            // the swap fee is the directional protocol fee compounded with the pool's
+            // current LP fee read from slot0. Because it reads the live lpFee, a
+            // dynamic-fee pool quotes against its currently-set fee rather than the
+            // 0x800000 DYNAMIC_FEE_FLAG sentinel in key.fee; that path is covered by
+            // construction but not yet by a dedicated dynamic-fee-pool parity test
+            // (tracked follow-up). Swap-time hook fee overrides remain out of scope: the
+            // quoter is hook-unaware by design.
+            uint16 directionalProtocolFee =
+                quoteParams.zeroForOne ? protocolFee.getZeroForOneFee() : protocolFee.getOneForZeroFee();
+            quoteParams.fee = directionalProtocolFee == 0 ? lpFee : directionalProtocolFee.calculateSwapFee(lpFee);
         }
 
         while (state.amountSpecifiedRemaining != 0 && state.sqrtPriceX96 != quoteParams.sqrtPriceLimitX96) {

@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.0;
 
-import {SwapParams, Quote} from "../src/base/OnchainRouterStructs.sol";
+import {SwapParams, Quote, Pool, SwapHop, V4} from "../src/base/OnchainRouterStructs.sol";
+import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
+import {PoolKey} from "v4-core/src/types/PoolKey.sol";
+import {PoolIdLibrary} from "v4-core/src/types/PoolId.sol";
+import {Currency} from "v4-core/src/types/Currency.sol";
+import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
+import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
 import {OnchainRouterExposed} from "./utils/OnchainRouterExposed.sol";
 import {MainnetForkFixture, BaseForkFixture, hasV4Hop} from "./utils/ForkFixtures.sol";
 import {ERC20} from "solmate/src/tokens/ERC20.sol";
@@ -109,10 +115,10 @@ contract QuoteSwapParityMainnetTest is MainnetForkFixture {
 }
 
 /// @notice V4 parity on a Base fork against live discovered pools.
-/// @dev Scope: hookless pools with zero protocol fee. Hooked pools may legitimately
-/// diverge (the quoter is hook-unaware by design) and a nonzero protocol fee is a KNOWN
-/// quoter gap (V4QuoterMath passes only key.fee to computeSwapStep); pools where either
-/// applies are skipped here and must be addressed before the parity gate is complete.
+/// @dev Scope: hookless pools. Hooked pools may legitimately diverge (the quoter is
+/// hook-unaware by design). Protocol fees are no longer a quoter gap: V4QuoterMath
+/// composes the effective swap fee from slot0's directional protocol fee and live LP
+/// fee, and QuoteSwapParityV4ProtocolFeeTest below asserts parity on a fee-charging pool.
 contract QuoteSwapParityV4BaseTest is BaseForkFixture {
     OnchainRouterExposed router;
 
@@ -156,6 +162,132 @@ contract QuoteSwapParityV4BaseTest is BaseForkFixture {
         uint256 amountIn = router.swapExactOutput{value: quote.amountIn}(quote, recipient, block.timestamp, false);
         assertEq(amountIn, quote.amountIn, "V4 exact-out: realized input must equal quote bit-for-bit");
         assertEq(ERC20(USDC).balanceOf(recipient), amountOut, "V4 exact-out: delivered amount must be exact");
+    }
+
+    receive() external payable {}
+}
+
+/// @notice F8: V4 parity must hold when the pool charges a protocol fee.
+/// @dev Pool.swap composes swapFee = protocolFee + lpFee; a quoter that only uses key.fee
+/// quotes high on every protocol-fee pool and the exact-bound design then reverts every
+/// swap. The fee is set here by impersonating the protocol fee controller on a live pool.
+contract QuoteSwapParityV4ProtocolFeeTest is BaseForkFixture {
+    using StateLibrary for IPoolManager;
+    using PoolIdLibrary for PoolKey;
+
+    OnchainRouterExposed router;
+    IPoolManager pm;
+
+    address recipient;
+    PoolKey poolKey;
+    bool poolFound;
+    address tokenIn; // address(0) for native ETH pools
+
+    function setUp() public {
+        _forkBase(32_000_000);
+        pm = IPoolManager(POOL_MANAGER);
+        router = new OnchainRouterExposed(V2_FACTORY, V3_FACTORY, POOL_MANAGER, WETH);
+        recipient = makeAddr("recipient");
+
+        // Probe default hookless configs for an ETH/USDC or WETH/USDC pool with real
+        // liquidity (an initialized-but-empty pool would quote zero and prove nothing)
+        uint24[4] memory fees = [uint24(500), uint24(3000), uint24(10000), uint24(100)];
+        int24[4] memory spacings = [int24(10), int24(60), int24(200), int24(1)];
+        address[2] memory candidates = [address(0), WETH];
+        for (uint256 c = 0; c < candidates.length && !poolFound; c++) {
+            for (uint256 i = 0; i < fees.length && !poolFound; i++) {
+                PoolKey memory key = _makeKey(candidates[c], USDC, fees[i], spacings[i]);
+                (uint160 sqrtPrice,,,) = pm.getSlot0(key.toId());
+                if (sqrtPrice != 0 && pm.getLiquidity(key.toId()) > 1e15) {
+                    poolKey = key;
+                    poolFound = true;
+                    tokenIn = candidates[c];
+                }
+            }
+        }
+
+        // Fail loud on fixture drift: a silent skip here would turn the whole F8
+        // regression suite green without asserting anything
+        require(poolFound, "F8 fixture drift: no liquid hookless (W)ETH/USDC pool at pinned block; update the probe");
+
+        // Asymmetric protocol fee (0.07% oneForZero / 0.03% zeroForOne, max 0.1% per
+        // direction) so the two directional fee getters must diverge
+        uint24 protocolFee = (uint24(700) << 12) | uint24(300);
+        vm.prank(pm.protocolFeeController());
+        pm.setProtocolFee(poolKey, protocolFee);
+    }
+
+    function _makeKey(address tokenA, address tokenB, uint24 fee, int24 tickSpacing)
+        private
+        pure
+        returns (PoolKey memory)
+    {
+        Currency c0 = Currency.wrap(tokenA);
+        Currency c1 = Currency.wrap(tokenB);
+        if (c0 > c1) (c0, c1) = (c1, c0);
+        return PoolKey({currency0: c0, currency1: c1, fee: fee, tickSpacing: tickSpacing, hooks: IHooks(address(0))});
+    }
+
+    function _poolQuote(uint256 amountIn) internal view returns (Quote memory quote, uint256 quoted) {
+        Pool[] memory path = new Pool[](1);
+        path[0] =
+            Pool({tokenIn: tokenIn, tokenOut: USDC, fee: poolKey.fee, pool: address(0), version: V4, key: poolKey});
+        quoted = router.externalV4QuoteExactIn(SwapHop({pool: path[0], amountSpecified: amountIn}));
+        quote = Quote({path: path, amountIn: amountIn, amountOut: quoted});
+    }
+
+    /// forge-config: default.fuzz.runs = 24
+    function testFuzz_parity_v4_protocolFee_exactIn(uint256 amountIn) public {
+        amountIn = bound(amountIn, 0.0001 ether, 20 ether);
+
+        (Quote memory quote, uint256 quoted) = _poolQuote(amountIn);
+        vm.assume(quoted > 0);
+
+        vm.deal(address(this), amountIn);
+        uint256 amountOut = router.swapExactInput{value: amountIn}(quote, recipient, block.timestamp, false);
+        assertEq(amountOut, quoted, "protocol-fee pool: realized output must equal quote bit-for-bit");
+    }
+
+    /// @notice Exact-out through the protocol-fee pool: covers the fee composition on
+    /// the exact-output quote path
+    function test_parity_v4_protocolFee_exactOut() public {
+        uint256 amountOut = 1_000e6;
+        Pool[] memory path = new Pool[](1);
+        path[0] =
+            Pool({tokenIn: tokenIn, tokenOut: USDC, fee: poolKey.fee, pool: address(0), version: V4, key: poolKey});
+        uint256 quotedIn = router.externalV4QuoteExactOut(SwapHop({pool: path[0], amountSpecified: amountOut}));
+        vm.assume(quotedIn > 0 && quotedIn < 100 ether);
+
+        Quote memory quote = Quote({path: path, amountIn: quotedIn, amountOut: amountOut});
+        vm.deal(address(this), quotedIn);
+        uint256 amountIn = router.swapExactOutput{value: quotedIn}(quote, recipient, block.timestamp, false);
+        assertEq(amountIn, quotedIn, "protocol-fee exact-out: realized input must equal quote bit-for-bit");
+    }
+
+    /// @notice The reverse direction (USDC in): exercises getOneForZeroFee, which differs
+    /// from the zeroForOne fee because the configured protocol fee is asymmetric
+    function test_parity_v4_protocolFee_oneForZero() public {
+        _dealUSDC(address(this), 10_000e6);
+        ERC20(USDC).approve(address(router), type(uint256).max);
+
+        Pool[] memory path = new Pool[](1);
+        path[0] =
+            Pool({tokenIn: USDC, tokenOut: tokenIn, fee: poolKey.fee, pool: address(0), version: V4, key: poolKey});
+        uint256 quoted = router.externalV4QuoteExactIn(SwapHop({pool: path[0], amountSpecified: 5_000e6}));
+        vm.assume(quoted > 0);
+
+        Quote memory quote = Quote({path: path, amountIn: 5_000e6, amountOut: quoted});
+        uint256 amountOut = router.swapExactInput(quote, recipient, block.timestamp, false);
+        assertEq(amountOut, quoted, "protocol-fee oneForZero: realized output must equal quote bit-for-bit");
+    }
+
+    function test_parity_v4_protocolFee_singleShot() public {
+        (Quote memory quote, uint256 quoted) = _poolQuote(0.05 ether);
+        assertGt(quoted, 0, "Probed pool must produce a usable quote");
+
+        vm.deal(address(this), 0.05 ether);
+        uint256 amountOut = router.swapExactInput{value: 0.05 ether}(quote, recipient, block.timestamp, false);
+        assertEq(amountOut, quoted, "protocol-fee pool: realized output must equal quote bit-for-bit");
     }
 
     receive() external payable {}

@@ -5,6 +5,7 @@ import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "v4-core/src/types/PoolId.sol";
 import {Currency} from "v4-core/src/types/Currency.sol";
 import {TickMath} from "v4-core/src/libraries/TickMath.sol";
+import {SafeCast} from "v4-core/src/libraries/SafeCast.sol";
 import {V4QuoterMath} from "./libraries/V4QuoterMath.sol";
 import {OnchainRouterImmutables} from "./base/OnchainRouterImmutables.sol";
 import {SwapHop} from "./base/OnchainRouterStructs.sol";
@@ -15,6 +16,11 @@ import {SwapHop} from "./base/OnchainRouterStructs.sol";
 /// Returns 0 (exact-in) or type(uint256).max (exact-out) on failure.
 abstract contract V4Quoter is OnchainRouterImmutables {
     using PoolIdLibrary for PoolKey;
+    /// @dev Narrowing the caller-supplied amount to int256 is unreachable in practice (it
+    /// would need a token amount above 2**255) and this is a caught view path, so the worst
+    /// case was a bad quote rather than fund loss. Use SafeCast anyway: V3Quoter already
+    /// does for the identical conversion, and a silent wrap is not worth the inconsistency.
+    using SafeCast for uint256;
 
     /// @dev Thrown when an exact-output quote cannot fully fill from the pool's liquidity.
     /// Caught by v4QuoteExactOut and converted to the unfillable sentinel.
@@ -35,12 +41,12 @@ abstract contract V4Quoter is OnchainRouterImmutables {
         V4QuoterMath.QuoteParams memory quoteParams = V4QuoterMath.QuoteParams({
             zeroForOne: zeroForOne,
             exactInput: true,
-            fee: key.fee,
+            fee: 0, // placeholder: V4QuoterMath composes the effective fee from slot0 (protocol fee + LP fee)
             sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
         });
 
         (int256 amount0, int256 amount1,,) =
-            V4QuoterMath.quote(poolManager, key.toId(), key.tickSpacing, -int256(swap.amountSpecified), quoteParams);
+            V4QuoterMath.quote(poolManager, key.toId(), key.tickSpacing, -swap.amountSpecified.toInt256(), quoteParams);
 
         amountOut = zeroForOne ? uint256(amount1) : uint256(amount0);
     }
@@ -60,12 +66,12 @@ abstract contract V4Quoter is OnchainRouterImmutables {
         V4QuoterMath.QuoteParams memory quoteParams = V4QuoterMath.QuoteParams({
             zeroForOne: zeroForOne,
             exactInput: false,
-            fee: key.fee,
+            fee: 0, // placeholder: V4QuoterMath composes the effective fee from slot0 (protocol fee + LP fee)
             sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
         });
 
         (int256 amount0, int256 amount1,,) =
-            V4QuoterMath.quote(poolManager, key.toId(), key.tickSpacing, int256(swap.amountSpecified), quoteParams);
+            V4QuoterMath.quote(poolManager, key.toId(), key.tickSpacing, swap.amountSpecified.toInt256(), quoteParams);
 
         // Full-fill check, mirroring V3 (SwapExecutor.V3InvalidAmountOut). The V4 loop
         // exits when the pool is exhausted, leaving a partial fill that would otherwise
