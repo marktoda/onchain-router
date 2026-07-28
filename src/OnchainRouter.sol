@@ -368,6 +368,7 @@ contract OnchainRouter is
             if (intermediate == params.tokenIn || intermediate == params.tokenOut) continue;
             bestQuote = routeExactOutputMulti(params, intermediate).better(bestQuote);
         }
+        bestQuote = _normalizeNoRoute(bestQuote);
     }
 
     /// @notice Find the optimal route allowing up to 3 hops. OPT-IN: strictly more
@@ -461,6 +462,23 @@ contract OnchainRouter is
                 bestQuote = legOne.combine(legTwo).combine(legThree).better(bestQuote);
             }
         }
+        bestQuote = _normalizeNoRoute(bestQuote);
+    }
+
+    /// @dev Collapse the internal unfillable sentinel into the canonical no-route quote.
+    /// routeExactOutputMulti signals an unfillable leg with {amountIn: uint256.max}, and
+    /// better() recognizes only amountIn == 0 as no-route, so when every candidate is empty
+    /// or sentinel the fold settles on uint256.max and hands the caller a quote that reads as
+    /// an astronomically expensive trade rather than "no route". EVERY exact-output entrypoint
+    /// must end with this. It previously lived inline in routeExactOutput and was lost when
+    /// this branch was cut from an earlier point of hardening/f6-intermediates; one helper
+    /// called from both exits is harder to drop silently than a duplicated block.
+    function _normalizeNoRoute(Quote memory q) private pure returns (Quote memory) {
+        if (q.amountIn == type(uint256).max) {
+            Quote memory empty;
+            return empty;
+        }
+        return q;
     }
 
     function routeExactInputMulti(SwapParams memory params, address intermediate)

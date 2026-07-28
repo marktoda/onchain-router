@@ -120,12 +120,13 @@ contract ThreeHopTest is MainnetForkFixture {
             SwapParams({amountSpecified: 50_000e18, tokenIn: address(tokenA), tokenOut: address(tokenB)});
         Quote memory quote = router.routeExactOutput3Hop(params);
 
-        // The only chain runs through the shallow legs; an unfillable request must come
-        // back unroutable (0 or sentinel), never a poisoned combined quote
-        assertTrue(
-            quote.amountIn == 0 || quote.amountIn == type(uint256).max,
-            "Unfillable 3-hop request must be reported unroutable, not mis-priced"
-        );
+        // The only chain runs through the shallow legs; an unfillable request must come back
+        // as the canonical empty quote, never the internal sentinel and never a poisoned
+        // combined quote. Accepting the sentinel here is what let the missing normalization
+        // at the routeExactOutput3Hop boundary go unnoticed.
+        assertEq(quote.amountIn, 0, "Unfillable 3-hop request must quote zero, never the uint max sentinel");
+        assertEq(quote.amountOut, 0, "Unfillable 3-hop request must quote zero output");
+        assertEq(quote.path.length, 0, "Unfillable 3-hop request must have an empty path");
     }
 
     // ======== Reverse-ordered intermediate pair ========
