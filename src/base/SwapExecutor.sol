@@ -202,8 +202,14 @@ abstract contract SwapExecutor is OnchainRouterImmutables, IUnlockCallback {
         amountOut = uint256(uint128(zeroForOne ? delta1 : delta0));
         poolManager.take(outputCurrency, isIntermediate ? address(this) : recipient, amountOut);
 
-        // Post-swap: wrap ETH→WETH if output is native ETH and we need ERC20 for next hop
-        if (outputCurrency.isAddressZero() && isIntermediate) {
+        // Post-swap: wrap ETH→WETH whenever the ROUTER itself holds the output, matching the
+        // exact-output hop's condition. Keying on isIntermediate alone missed the final-hop
+        // case where the router is the recipient because unwrapOutput=true: the router kept
+        // raw ETH and OnchainRouter's immediate WETH.withdraw(amountOut) then
+        // underflow-reverted, so exact-input reverted on a route the exact-output twin
+        // handled. recipient == address(this) subsumes the intermediate case, since every
+        // non-final hop is already passed address(this) as its recipient.
+        if (outputCurrency.isAddressZero() && recipient == address(this)) {
             IWETH9(weth).deposit{value: amountOut}();
         }
     }

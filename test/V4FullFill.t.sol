@@ -195,6 +195,39 @@ contract V4NativeFullFillTest is BaseForkFixture {
         });
     }
 
+    /// @notice Regression: an exact-input swap whose FINAL hop outputs native ETH and whose
+    /// caller asked for unwrapOutput must succeed.
+    /// @dev The exact-input hop used to wrap ETH→WETH only when the hop was intermediate,
+    /// while the exact-output hop wrapped whenever the router was the recipient. Those agree
+    /// everywhere except here: with unwrapOutput=true the router IS the recipient on the
+    /// final hop, so exact-input skipped the wrap, kept raw ETH, and then OnchainRouter's
+    /// WETH.withdraw(amountOut) underflow-reverted on WETH it never received. The
+    /// exact-output twin of the same trade worked, which is what made the asymmetry visible.
+    function test_v4ExactIn_nativeOutput_unwrapOutput_succeeds() public {
+        tokenB.approve(address(router), type(uint256).max);
+
+        // Reverse direction through the same pool: tokenB in, native ETH out.
+        Pool memory reversePool = Pool({
+            tokenIn: address(tokenB),
+            tokenOut: address(0),
+            fee: 3000,
+            pool: address(0),
+            version: V4,
+            key: poolKey
+        });
+        Pool[] memory path = new Pool[](1);
+        path[0] = reversePool;
+        Quote memory quote = Quote({path: path, amountIn: 1e11, amountOut: 0});
+
+        uint256 recipientBefore = recipient.balance;
+        uint256 amountOut = router.swapExactInput(quote, recipient, block.timestamp, true, 1);
+
+        assertGt(amountOut, 0, "Native-output exact-input with unwrap must deliver");
+        assertEq(recipient.balance - recipientBefore, amountOut, "Recipient must receive native ETH");
+        assertEq(address(router).balance, 0, "No native ETH may strand in the router");
+        assertEq(ERC20(WETH).balanceOf(address(router)), 0, "No WETH may strand in the router");
+    }
+
     /// @notice BEHAVIOR CHANGE: native-ETH twin of
     /// test_v4ExactIn_partialFill_revertsIncompleteInput. Previously asserted a partial fill
     /// plus refund; full consumption is now enforced on every hop. See that test for why.
