@@ -277,7 +277,6 @@ contract V4BaseForkTest is Test {
     receive() external payable {}
 }
 
-
 /// @notice Unit tests for the V4PoolRegistry leaderboard mechanism (no fork needed):
 /// pairwise pokeable challenges with min-sampling, and per-slot membership cooldowns.
 contract V4LeaderboardTest is Test {
@@ -339,22 +338,22 @@ contract V4LeaderboardTest is Test {
     // ======== Direct registration (non-full board) ========
 
     function test_registerV4Pool_success() public {
-        _mockPool(address(0xABC), 1e18);
-        router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, address(0xABC));
+        _mockPool(_hook(0xABC), 1e18);
+        router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, _hook(0xABC));
     }
 
     function test_registerV4Pool_reverts_nonExistentPool() public {
-        PoolKey memory key = _makeKey(TOKEN_A, TOKEN_B, 500, 10, address(0xABC));
+        PoolKey memory key = _makeKey(TOKEN_A, TOKEN_B, 500, 10, _hook(0xABC));
         _mockSlot0(PoolId.unwrap(key.toId()), 0);
         vm.expectRevert(V4PoolRegistry.PoolDoesNotExist.selector);
-        router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, address(0xABC));
+        router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, _hook(0xABC));
     }
 
     function test_registerV4Pool_reverts_zeroLiquidity() public {
         // Initialized (nonzero sqrtPrice) but empty: not a routing candidate, must not squat a slot
-        _mockPool(address(0xABC), 0);
+        _mockPool(_hook(0xABC), 0);
         vm.expectRevert(V4PoolRegistry.PoolHasNoLiquidity.selector);
-        router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, address(0xABC));
+        router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, _hook(0xABC));
     }
 
     function test_registerV4Pool_reverts_defaultConfig() public {
@@ -365,34 +364,34 @@ contract V4LeaderboardTest is Test {
     }
 
     function test_registerV4Pool_reverts_duplicate() public {
-        _mockPool(address(0xABC), 1e18);
-        router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, address(0xABC));
+        _mockPool(_hook(0xABC), 1e18);
+        router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, _hook(0xABC));
         vm.expectRevert(V4PoolRegistry.DuplicatePool.selector);
-        router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, address(0xABC));
+        router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, _hook(0xABC));
     }
 
     function test_registerV4Pool_reverts_whenBoardFull() public {
         _fillBoard(100e18);
-        _mockPool(address(uint160(9000)), 1000e18);
+        _mockPool(_hook(9000), 1000e18);
         vm.expectRevert(V4PoolRegistry.BoardFull.selector);
-        router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, address(uint160(9000)));
+        router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, _hook(9000));
     }
 
     // ======== Challenge declaration ========
 
     function test_startChallenge_reverts_boardNotFull() public {
-        _mockPool(address(uint160(1000)), 100e18);
-        router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, address(uint160(1000)));
-        _mockPool(address(uint160(9000)), 1000e18);
+        _mockPool(_hook(1000), 100e18);
+        router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, _hook(1000));
+        _mockPool(_hook(9000), 1000e18);
         vm.expectRevert(V4PoolRegistry.BoardNotFull.selector);
-        _start(address(uint160(9000)), address(uint160(1000)));
+        _start(_hook(9000), _hook(1000));
     }
 
     function test_startChallenge_reverts_challengerAlreadyListed() public {
         _fillBoard(100e18);
         _rollPastCooldown();
         vm.expectRevert(V4PoolRegistry.DuplicatePool.selector);
-        _start(address(uint160(1000)), address(uint160(2000)));
+        _start(_hook(1000), _hook(2000));
     }
 
     function test_startChallenge_reverts_defaultConfigChallenger() public {
@@ -401,80 +400,80 @@ contract V4LeaderboardTest is Test {
         // A default config can never be a challenger: it is probed anyway and must not
         // be able to take a board slot
         vm.expectRevert(V4PoolRegistry.DefaultConfigNotAllowed.selector);
-        _start(address(0), address(uint160(1000)));
+        _start(address(0), _hook(1000));
     }
 
     function test_startChallenge_reverts_targetNotListed() public {
         _fillBoard(100e18);
         _rollPastCooldown();
-        _mockPool(address(uint160(9000)), 1000e18);
+        _mockPool(_hook(9000), 1000e18);
         vm.expectRevert(V4PoolRegistry.TargetNotListed.selector);
-        _start(address(uint160(9000)), address(uint160(7777)));
+        _start(_hook(9000), _hook(7777));
     }
 
     function test_startChallenge_reverts_zeroLiquidityChallenger() public {
         _fillBoard(100e18);
         _rollPastCooldown();
-        _mockPool(address(uint160(9000)), 0);
+        _mockPool(_hook(9000), 0);
         vm.expectRevert(V4PoolRegistry.PoolHasNoLiquidity.selector);
-        _start(address(uint160(9000)), address(uint160(3000)));
+        _start(_hook(9000), _hook(3000));
     }
 
     function test_startChallenge_reverts_nonExistentChallenger() public {
         _fillBoard(100e18);
         _rollPastCooldown();
-        PoolKey memory key = _makeKey(TOKEN_A, TOKEN_B, 500, 10, address(uint160(9000)));
+        PoolKey memory key = _makeKey(TOKEN_A, TOKEN_B, 500, 10, _hook(9000));
         _mockSlot0(PoolId.unwrap(key.toId()), 0);
         vm.expectRevert(V4PoolRegistry.PoolDoesNotExist.selector);
-        _start(address(uint160(9000)), address(uint160(3000)));
+        _start(_hook(9000), _hook(3000));
     }
 
     function test_startChallenge_reverts_freshRegistrantInCooldown() public {
         // Filling the board just stamped every slot's membership cooldown
         _fillBoard(100e18);
-        _mockPool(address(uint160(9000)), 1000e18);
+        _mockPool(_hook(9000), 1000e18);
         vm.expectRevert(V4PoolRegistry.SlotInCooldown.selector);
-        _start(address(uint160(9000)), address(uint160(3000)));
+        _start(_hook(9000), _hook(3000));
 
         // At exactly cooldownUntil the slot becomes contestable
         _warpBy(SLOT_COOLDOWN);
-        _start(address(uint160(9000)), address(uint160(3000)));
+        _start(_hook(9000), _hook(3000));
     }
 
     function test_startChallenge_reverts_pendingRedeclaration() public {
         _fillBoard(100e18);
         _rollPastCooldown();
-        address challengerOne = address(uint160(9000));
+        address challengerOne = _hook(9000);
         _mockPool(challengerOne, 1000e18);
-        _start(challengerOne, address(uint160(3000)));
+        _start(challengerOne, _hook(3000));
 
         // A different challenger runs concurrently, even against the same target: one
         // bogus challenge cannot occupy a per-pair slot and freeze eviction
-        address challengerTwo = address(uint160(9100));
+        address challengerTwo = _hook(9100);
         _mockPool(challengerTwo, 1000e18);
-        _start(challengerTwo, address(uint160(3000)));
+        _start(challengerTwo, _hook(3000));
 
         // Re-declaring the SAME challenge cannot reset its clock or its recorded mins
         vm.expectRevert(V4PoolRegistry.ChallengePending.selector);
-        _start(challengerOne, address(uint160(3000)));
+        _start(challengerOne, _hook(3000));
 
         // Past expiry the same config can start fresh
         _warpBy(CHALLENGE_EXPIRY + 1);
-        _start(challengerOne, address(uint160(3000)));
+        _start(challengerOne, _hook(3000));
     }
 
     function test_startChallenge_blockedAtExactExpiryBoundary() public {
         _fillBoard(100e18);
         _rollPastCooldown();
-        address challenger = address(uint160(9000));
+        address challenger = _hook(9000);
         _mockPool(challenger, 1000e18);
-        _start(challenger, address(uint160(3000)));
+        _start(challenger, _hook(3000));
 
         // Inclusive boundary: at exactly startedAt + EXPIRY the challenge still occupies
         // its key and re-declaring must revert
         _warpBy(CHALLENGE_EXPIRY);
         vm.expectRevert(V4PoolRegistry.ChallengePending.selector);
-        _start(challenger, address(uint160(3000)));
+        _start(challenger, _hook(3000));
     }
 
     // ======== Challenge lifecycle ========
@@ -482,10 +481,10 @@ contract V4LeaderboardTest is Test {
     function test_challenge_fullFlow_evictsNamedTarget() public {
         _fillBoard(100e18);
         _rollPastCooldown();
-        address target = address(uint160(3000));
+        address target = _hook(3000);
         _mockLiquidityFor(target, 5e18);
 
-        address challenger = address(uint160(9000));
+        address challenger = _hook(9000);
         _mockPool(challenger, 1000e18);
         _start(challenger, target);
 
@@ -495,7 +494,7 @@ contract V4LeaderboardTest is Test {
         // The challenger now holds the slot: re-using it as a challenger config hits the
         // duplicate check
         vm.expectRevert(V4PoolRegistry.DuplicatePool.selector);
-        _start(challenger, address(uint160(1000)));
+        _start(challenger, _hook(1000));
 
         // The evicted target is gone (it passes the duplicate check as a challenger) and
         // the winner's slot is protected by the membership cooldown
@@ -507,9 +506,9 @@ contract V4LeaderboardTest is Test {
     function test_challenge_reverts_beforeDelay() public {
         _fillBoard(100e18);
         _rollPastCooldown();
-        address challenger = address(uint160(9000));
+        address challenger = _hook(9000);
         _mockPool(challenger, 1000e18);
-        _start(challenger, address(uint160(3000)));
+        _start(challenger, _hook(3000));
 
         _warpBy(CHALLENGE_DELAY - 1);
         vm.expectRevert(V4PoolRegistry.ChallengeNotReady.selector);
@@ -518,95 +517,31 @@ contract V4LeaderboardTest is Test {
 
     function test_challenge_reverts_noChallenge() public {
         vm.expectRevert(V4PoolRegistry.NoChallenge.selector);
-        _finalize(address(uint160(9000)));
+        _finalize(_hook(9000));
     }
 
     function test_challenge_tie_keepsIncumbent() public {
         _fillBoard(100e18);
         _rollPastCooldown();
-        address challenger = address(uint160(9000));
+        address challenger = _hook(9000);
         _mockPool(challenger, 100e18); // exactly equal to the target's liquidity
-        _start(challenger, address(uint160(3000)));
+        _start(challenger, _hook(3000));
 
         _warpBy(CHALLENGE_DELAY);
         assertFalse(_finalize(challenger), "Equal mins must keep the incumbent (strict inequality)");
     }
 
-    function test_challenge_jitChallenger_cannotWin() public {
-        _fillBoard(100e18);
-        _rollPastCooldown();
-        address target = address(uint160(3000));
-        address challenger = address(uint160(9000));
-        _mockPool(challenger, 1000e18); // JIT capital parked at declaration
-        _start(challenger, target);
-
-        // Capital leaves mid-window; anyone pokes and pins the challenger's min at 1
-        _warpBy(12 hours);
-        _mockLiquidityFor(challenger, 1);
-        vm.expectEmit(true, false, false, true);
-        emit V4ChallengePoked(_pairHash(), 500, 10, challenger, 1, 100e18);
-        _poke(challenger);
-
-        // JIT re-add right before finalization cannot raise the recorded min
-        _mockLiquidityFor(challenger, 1000e18);
-        _warpBy(CHALLENGE_DELAY);
-        assertFalse(_finalize(challenger), "Flash/JIT liquidity at finalize must not win");
-
-        // The target survived and is immediately re-challengeable (failed challenges
-        // stamp no cooldown)
-        _mockPool(address(uint160(9100)), 1000e18);
-        _start(address(uint160(9100)), target);
-    }
-
-    function test_challenge_lateDefense_cannotHelp() public {
-        _fillBoard(100e18);
-        _rollPastCooldown();
-        address target = address(uint160(3000));
-        address challenger = address(uint160(9000));
-        _mockPool(challenger, 50e18);
-        _start(challenger, target);
-
-        // The target's LPs leave mid-window; a poke pins its min at 1
-        _warpBy(12 hours);
-        _mockLiquidityFor(target, 1);
-        vm.expectEmit(true, false, false, true);
-        emit V4ChallengePoked(_pairHash(), 500, 10, challenger, 50e18, 1);
-        _poke(challenger);
-
-        // Front-running finalize with a big deposit is pointless: the min stands
-        _mockLiquidityFor(target, 500e18);
-        _warpBy(CHALLENGE_DELAY);
-        assertTrue(_finalize(challenger), "Liquidity added after a low poke must not save the target");
-    }
-
-    function test_poke_cannotRaiseMin() public {
-        _fillBoard(100e18);
-        _rollPastCooldown();
-        address challenger = address(uint160(9000));
-        _mockPool(challenger, 1); // 1-wei challenger: min pinned at declaration
-        _start(challenger, address(uint160(3000)));
-
-        // Pumping liquidity and poking must NOT raise the stored min
-        _mockLiquidityFor(challenger, 1000e18);
-        vm.expectEmit(true, false, false, true);
-        emit V4ChallengePoked(_pairHash(), 500, 10, challenger, 1, 100e18);
-        _poke(challenger);
-
-        _warpBy(CHALLENGE_DELAY);
-        assertFalse(_finalize(challenger), "A min can never be raised by a poke");
-    }
-
     function test_poke_reverts_noChallenge() public {
         vm.expectRevert(V4PoolRegistry.NoChallenge.selector);
-        _poke(address(uint160(9000)));
+        _poke(_hook(9000));
     }
 
     function test_poke_expiryBoundary() public {
         _fillBoard(100e18);
         _rollPastCooldown();
-        address challenger = address(uint160(9000));
+        address challenger = _hook(9000);
         _mockPool(challenger, 1000e18);
-        _start(challenger, address(uint160(3000)));
+        _start(challenger, _hook(3000));
 
         // Valid at exactly startedAt + EXPIRY...
         _warpBy(CHALLENGE_EXPIRY);
@@ -621,9 +556,9 @@ contract V4LeaderboardTest is Test {
     function test_challenge_expired_finalizesAsFailure() public {
         _fillBoard(100e18);
         _rollPastCooldown();
-        address target = address(uint160(3000));
+        address target = _hook(3000);
         _mockLiquidityFor(target, 5e18);
-        address challenger = address(uint160(9000));
+        address challenger = _hook(9000);
         _mockPool(challenger, 1000e18);
         _start(challenger, target);
 
@@ -631,16 +566,16 @@ contract V4LeaderboardTest is Test {
         assertFalse(_finalize(challenger), "Expired challenge must fail, not evict");
 
         // The target kept its slot: challenging it again works immediately
-        _mockPool(address(uint160(9100)), 1000e18);
-        _start(address(uint160(9100)), target);
+        _mockPool(_hook(9100), 1000e18);
+        _start(_hook(9100), target);
     }
 
     function test_challenge_finalizesAtExactExpiryBoundary() public {
         _fillBoard(100e18);
         _rollPastCooldown();
-        address target = address(uint160(3000));
+        address target = _hook(3000);
         _mockLiquidityFor(target, 5e18);
-        address challenger = address(uint160(9000));
+        address challenger = _hook(9000);
         _mockPool(challenger, 1000e18);
         _start(challenger, target);
 
@@ -652,12 +587,12 @@ contract V4LeaderboardTest is Test {
     function test_challenge_voidWhenTargetAlreadyEvicted() public {
         _fillBoard(100e18);
         _rollPastCooldown();
-        address target = address(uint160(3000));
+        address target = _hook(3000);
         _mockLiquidityFor(target, 5e18);
 
         // Two concurrent challengers name the SAME target
-        address first = address(uint160(9000));
-        address second = address(uint160(9100));
+        address first = _hook(9000);
+        address second = _hook(9100);
         _mockPool(first, 1000e18);
         _mockPool(second, 2000e18);
         _start(first, target);
@@ -669,14 +604,14 @@ contract V4LeaderboardTest is Test {
 
         // The void challenger was NOT listed: it can immediately declare a fresh
         // challenge (against a slot that is out of cooldown)
-        _start(second, address(uint160(5000)));
+        _start(second, _hook(5000));
     }
 
     function test_challenge_failed_targetImmediatelyRechallengeable() public {
         _fillBoard(100e18);
         _rollPastCooldown();
-        address target = address(uint160(3000));
-        address challenger = address(uint160(9000));
+        address target = _hook(3000);
+        address challenger = _hook(9000);
         _mockPool(challenger, 1e18); // far below the target's 100e18
         _start(challenger, target);
 
@@ -695,16 +630,16 @@ contract V4LeaderboardTest is Test {
     function test_challenge_evictionWinnerProtectedForCooldown() public {
         _fillBoard(100e18);
         _rollPastCooldown();
-        address target = address(uint160(3000));
+        address target = _hook(3000);
         _mockLiquidityFor(target, 5e18);
-        address challenger = address(uint160(9000));
+        address challenger = _hook(9000);
         _mockPool(challenger, 1000e18);
         _start(challenger, target);
         _warpBy(CHALLENGE_DELAY);
         assertTrue(_finalize(challenger));
 
         // Fresh eviction winner cannot be named as a target until its cooldown lapses
-        address next = address(uint160(9100));
+        address next = _hook(9100);
         _mockPool(next, 2000e18);
         vm.expectRevert(V4PoolRegistry.SlotInCooldown.selector);
         _start(next, challenger);
@@ -714,6 +649,198 @@ contract V4LeaderboardTest is Test {
     }
 
     // ======== Helpers ========
+
+    /// @notice The reported griefing attack: an attacker swaps a healthy target's price out of
+    /// its concentrated range, pokes, and swaps back, all atomically. Under time-weighted
+    /// scoring that manufactured dip is credited zero seconds, so it must not move the score.
+    /// Under the previous min-of-samples scoring this single atomic sequence permanently pinned
+    /// the target for the whole window and the incumbent had no defensive move.
+    function test_challenge_atomicDipDoesNotMoveTargetScore() public {
+        _fillBoard(100e18);
+        _rollPastCooldown();
+        address target = _hook(3000);
+        address challenger = _hook(9000);
+        _mockPool(challenger, 50e18); // genuinely shallower than the target
+        _start(challenger, target);
+
+        _warpBy(12 hours);
+
+        // Atomic: dip, poke, restore. No time passes between the dip and the restore.
+        _mockLiquidityFor(target, 1);
+        _poke(challenger);
+        _mockLiquidityFor(target, 100e18);
+        _poke(challenger);
+
+        _warpBy(CHALLENGE_DELAY);
+        assertFalse(_finalize(challenger), "An atomic dip must not cost the target its slot");
+    }
+
+    /// @notice The defensive move that min-scoring could not offer: after an attacker records a
+    /// manipulated dip, ANY party can counter-poke and limit that observation's weight to the
+    /// gap between the two samples.
+    function test_challenge_counterPokeNeutralizesManipulatedSample() public {
+        _fillBoard(100e18);
+        _rollPastCooldown();
+        address target = _hook(3000);
+        address challenger = _hook(9000);
+        _mockPool(challenger, 50e18);
+        _start(challenger, target);
+
+        _warpBy(12 hours);
+
+        // Attacker records a dip, then restores the pool but leaves the stale sample in place.
+        _mockLiquidityFor(target, 1);
+        _poke(challenger);
+        _mockLiquidityFor(target, 100e18);
+
+        // A counter-poke one hour later stops the stale sample accruing any further.
+        _warpBy(1 hours);
+        _poke(challenger);
+
+        _warpBy(CHALLENGE_DELAY);
+        assertFalse(_finalize(challenger), "A counter-poke must save a genuinely deeper target");
+    }
+
+    /// @notice The honest signal still works: a target that is ACTUALLY thin for most of the
+    /// window loses to a deeper challenger. Distinguishes the fix from simply ignoring dips.
+    function test_challenge_sustainedDipLowersTargetScore() public {
+        _fillBoard(100e18);
+        _rollPastCooldown();
+        address target = _hook(3000);
+        address challenger = _hook(9000);
+        _mockPool(challenger, 50e18);
+        _start(challenger, target);
+
+        // The target empties out almost immediately and stays empty, recorded by one poke.
+        _mockLiquidityFor(target, 1);
+        _poke(challenger);
+
+        _warpBy(CHALLENGE_DELAY + 6 hours);
+        assertTrue(_finalize(challenger), "A sustained loss of liquidity must cost the slot");
+    }
+
+    /// @notice Anti-JIT, preserved from the previous design: capital parked only at declaration
+    /// and re-added just before finalization earns almost no weight.
+    function test_challenge_flashLiquidityDoesNotWinSlot() public {
+        _fillBoard(100e18);
+        _rollPastCooldown();
+        address target = _hook(3000);
+        address challenger = _hook(9000);
+        _mockPool(challenger, 1000e18); // JIT capital parked at declaration
+        _start(challenger, target);
+
+        // Capital leaves immediately; anyone records that.
+        _mockLiquidityFor(challenger, 1);
+        _poke(challenger);
+
+        // Re-adding right before finalization cannot buy back the window that already elapsed.
+        _warpBy(CHALLENGE_DELAY);
+        _mockLiquidityFor(challenger, 1000e18);
+        assertFalse(_finalize(challenger), "Flash/JIT liquidity must not win a slot");
+
+        // The target survived and is immediately re-challengeable (failed challenges stamp no
+        // cooldown)
+        _mockPool(_hook(9100), 1000e18);
+        _start(_hook(9100), target);
+    }
+
+    /// @notice A challenger that genuinely holds more liquidity for the whole window wins. This
+    /// is the legitimate counterpart to the JIT test: sustained depth is exactly what the board
+    /// is supposed to reward.
+    function test_challenge_sustainedDeeperChallengerWins() public {
+        _fillBoard(100e18);
+        _rollPastCooldown();
+        address target = _hook(3000);
+        address challenger = _hook(9000);
+        _mockPool(challenger, 1000e18);
+        _start(challenger, target);
+
+        _warpBy(CHALLENGE_DELAY + 6 hours);
+        assertTrue(_finalize(challenger), "Sustained deeper liquidity must win the slot");
+    }
+
+    /// @notice Finalize timing is neutral. No sample taken at finalization can earn weight, and
+    /// both sides accrue over the same span, so racing finalize gains nothing. Under the
+    /// previous design the finalization sample could decide the outcome on its own.
+    function test_finalize_timingDoesNotAffectOutcome() public {
+        _fillBoard(100e18);
+        _rollPastCooldown();
+        address target = _hook(3000);
+        address challenger = _hook(9000);
+        _mockPool(challenger, 1000e18);
+        _start(challenger, target);
+        _warpBy(CHALLENGE_DELAY);
+
+        // Snapshot, finalize early, then redo the same challenge and finalize much later.
+        uint256 snap = vm.snapshot();
+        bool early = _finalize(challenger);
+        vm.revertTo(snap);
+
+        // A manipulated reading at the very moment of finalization must not change anything.
+        _warpBy(6 hours);
+        _mockLiquidityFor(challenger, 1);
+        bool late = _finalize(challenger);
+
+        assertEq(early, late, "Finalize timing must not change the outcome");
+    }
+
+    // ───────────────────── hook gate ─────────────────────
+
+    /// @dev Delta-returning hook addresses. V4 encodes permissions in the address bits, so
+    /// these are constructed rather than mocked: poolManager reads the same bits.
+    function _deltaHook() internal pure returns (address) {
+        return address(uint160((1 << 7) | (1 << 3))); // BEFORE_SWAP | BEFORE_SWAP_RETURNS_DELTA
+    }
+
+    function _observerHook() internal pure returns (address) {
+        return address(uint160(1 << 7)); // BEFORE_SWAP only: watches or reverts, cannot alter amounts
+    }
+
+    function test_registerV4Pool_revertsOnCustomAccountingHook() public {
+        _mockPool(_deltaHook(), 1e18);
+        vm.expectRevert(V4PoolRegistry.CustomAccountingHookNotAllowed.selector);
+        router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, _deltaHook());
+    }
+
+    /// @dev The challenge path is the second permissionless way onto the board and needs the
+    /// same gate, or a custom-accounting pool could take a slot by eviction instead.
+    function test_startChallenge_revertsOnCustomAccountingHook() public {
+        _fillBoard(100e18);
+        _rollPastCooldown();
+        _mockPool(_deltaHook(), 1000e18);
+        vm.expectRevert(V4PoolRegistry.CustomAccountingHookNotAllowed.selector);
+        _start(_deltaHook(), _hook(3000));
+    }
+
+    /// @dev Observer hooks stay eligible: banning all hooks would also exclude every
+    /// dynamic-fee pool, since those require a hook to set their fee.
+    function test_registerV4Pool_allowsObserverHook() public {
+        _mockPool(_observerHook(), 1e18);
+        router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, _observerHook());
+    }
+
+    // ───────────────────── accumulator bounds ─────────────────────
+
+    /// @notice The accumulators are unchecked, so pin the overflow argument: uint128 liquidity
+    /// integrated over at most CHALLENGE_EXPIRY seconds is ~8.8e43 against a uint160 ceiling of
+    /// ~1.46e48. Drive both sides at extreme liquidity across the full window.
+    function testFuzz_accumulator_neverOverflows(uint128 liquidity, uint32 gap) public {
+        liquidity = uint128(bound(liquidity, 1, type(uint128).max));
+        uint256 firstGap = bound(gap, 1, CHALLENGE_EXPIRY - CHALLENGE_DELAY - 1);
+
+        _fillBoard(type(uint128).max);
+        _rollPastCooldown();
+        address challenger = _hook(9000);
+        _mockPool(challenger, liquidity);
+        _start(challenger, _hook(3000));
+
+        _warpBy(firstGap);
+        _poke(challenger);
+
+        // Land inside the finalize window and settle: must not revert on overflow.
+        _warpBy(CHALLENGE_DELAY);
+        _finalize(challenger);
+    }
 
     function _start(address challengerHooks, address targetHooks) internal {
         router.startV4Challenge(TOKEN_A, TOKEN_B, 500, 10, challengerHooks, 500, 10, targetHooks);
@@ -729,7 +856,7 @@ contract V4LeaderboardTest is Test {
 
     function _fillBoard(uint128 liquidityEach) internal {
         for (uint256 i = 1; i <= 8; i++) {
-            address hooks = address(uint160(i * 1000));
+            address hooks = _hook(i * 1000);
             _mockPool(hooks, liquidityEach);
             router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, hooks);
         }
@@ -754,6 +881,14 @@ contract V4LeaderboardTest is Test {
     function _mockLiquidityFor(address hooks, uint128 liquidity) internal {
         PoolKey memory key = _makeKey(TOKEN_A, TOKEN_B, 500, 10, hooks);
         _mockLiquidity(PoolId.unwrap(key.toId()), liquidity);
+    }
+
+    /// @dev Hook addresses for fixtures. V4 encodes hook permissions in the ADDRESS bits, and
+    /// registration rejects the *_RETURNS_DELTA bits (1<<3, 1<<2), so a bare small integer like
+    /// 1000 (0x3E8, which has bit 3 set) would read as a custom-accounting hook. Shifting left
+    /// 12 clears every permission bit while keeping distinct inputs distinct.
+    function _hook(uint256 n) internal pure returns (address) {
+        return address(uint160(n << 12));
     }
 
     function _makeKey(address tokenA, address tokenB, uint24 fee, int24 tickSpacing, address hooks)

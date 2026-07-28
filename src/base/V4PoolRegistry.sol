@@ -6,6 +6,7 @@ import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "v4-core/src/types/PoolId.sol";
 import {Currency} from "v4-core/src/types/Currency.sol";
 import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
+import {Hooks} from "v4-core/src/libraries/Hooks.sol";
 import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
 import {Pool, V4} from "./OnchainRouterStructs.sol";
 import {OnchainRouterImmutables} from "./OnchainRouterImmutables.sol";
@@ -14,23 +15,36 @@ import {OnchainRouterImmutables} from "./OnchainRouterImmutables.sol";
 /// @dev Default configs check standard (fee, tickSpacing) combos with hooks=address(0);
 /// they are always probed and may never occupy leaderboard slots. The leaderboard holds
 /// up to 8 registered pools per pair. Joining a non-full board is direct; a full board is
-/// contested through a PAIRWISE, POKEABLE CHALLENGE: the challenger names one incumbent
-/// slot as its target, both pools' active liquidity is sampled at declaration, at any
-/// point during the window (permissionless pokes), and once more at finalization, and
-/// each side's score is the MINIMUM of all its samples. The challenger evicts the named
-/// target only if its min strictly exceeds the target's. A single poke taken while a
-/// challenger's flash/JIT capital is absent pins its score down for the whole window,
-/// and late defense is equally pointless (a min can never be raised). NOTE the vigilance
-/// assumption: with zero pokes only the declaration and finalization samples exist, and
-/// the challenger controls both timings, so the anti-JIT guarantee is exactly as strong
-/// as the pokers watching the challenge. That is the intended trust model — the
-/// challenged incumbent's own LPs are the motivated pokers (one poke defends their
-/// slot), and an incumbent so abandoned that nobody pokes for the whole window is
-/// precisely the kind of entry the board should surrender. Slots that just changed
-/// hands are protected by a short cooldown (see SLOT_COOLDOWN).
+/// contested through a PAIRWISE, POKEABLE CHALLENGE: the challenger names one incumbent slot
+/// as its target, and each side's score is its liquidity INTEGRATED OVER TIME across the
+/// window. Every sample (declaration, any permissionless poke, finalization) credits the
+/// PREVIOUS observation for the seconds it actually held. The challenger evicts the named
+/// target only if its integral strictly exceeds the target's.
+///
+/// Weighting by duration makes both sides honest. Flash/JIT capital present for one
+/// transaction earns ~0 weight, so a challenger cannot buy a slot with a flash loan.
+/// Symmetrically, a transient dip manufactured against a target (swap its price out of range,
+/// poke, swap back, all atomic) also earns ~0 weight. That symmetry is the correction to the
+/// previous min-of-samples design, under which one manufactured dip pinned a healthy pool for
+/// the entire window and the incumbent had NO defensive move, because a minimum can only ever
+/// fall.
+///
+/// RESIDUAL, accepted: an observation is carried forward until the next one, so a manipulated
+/// sample left uncorrected accrues weight for as long as nobody pokes. An attacker cannot have
+/// both a large weight and a short exposure, since weight is proportional to the uncorrected
+/// duration and any single counter-poke by any party ends it. Manipulating at declaration or
+/// immediately before finalization is worthless (zero elapsed time), so the attack requires an
+/// extended stretch of total inattention against a pool whose real depth would otherwise
+/// dominate. Pokes are deliberately NOT rate-limited so a counter-poke can land in the next
+/// block, and the poke/finalize events carry both accumulators so this is monitorable offchain.
+///
+/// Ties keep the incumbent. Finalize timing is neutral: both sides accrue over the same span,
+/// and no sample taken at finalization can earn weight. Slots that just changed hands are
+/// protected by a short cooldown (see SLOT_COOLDOWN).
 abstract contract V4PoolRegistry is OnchainRouterImmutables {
     using StateLibrary for IPoolManager;
     using PoolIdLibrary for PoolKey;
+    using Hooks for IHooks;
 
     struct V4PoolConfig {
         uint24 fee;
@@ -47,17 +61,30 @@ abstract contract V4PoolRegistry is OnchainRouterImmutables {
         uint48 cooldownUntil;
     }
 
-    /// @dev A pending pairwise challenge, keyed by (pair, challenger config). The two
-    /// mins start as the declaration-time samples and only ever decrease (via pokes and
-    /// the finalization sample). startedAt is a uint48 (see V4PoolEntry.cooldownUntil)
-    /// so the identity fields pack into one slot and the mins into a second.
+    /// @dev A pending pairwise challenge, keyed by (pair, challenger config). Each side
+    /// carries a TIME-WEIGHTED accumulator rather than a running minimum: its score is
+    /// liquidity integrated over the window, not the worst instant observed. Field order is
+    /// load-bearing for packing, 4 slots:
+    ///   0: startedAt | targetFee | targetTickSpacing | targetHooks  (48+24+24+160 = 256)
+    ///   1: challengerLast | targetLast                              (128+128     = 256)
+    ///   2: challengerAcc | lastSampleAt                             (160+48      = 208)
+    ///   3: targetAcc                                                (160)
+    /// Slots 2 and 3 keep 48 and 96 spare bits, so a future sampling-coverage gate can be
+    /// added without disturbing the layout of any existing field.
     struct V4Challenge {
         uint48 startedAt;
         uint24 targetFee;
         int24 targetTickSpacing;
         address targetHooks;
-        uint128 challengerMin;
-        uint128 targetMin;
+        /// @dev Most recent observation for each side, carried forward until the next sample
+        /// credits it for the time it actually held.
+        uint128 challengerLast;
+        uint128 targetLast;
+        /// @dev Sum of liquidity * seconds. A uint128 liquidity over at most CHALLENGE_EXPIRY
+        /// seconds is ~8.8e43 against a uint160 ceiling of ~1.46e48: cannot overflow.
+        uint160 challengerAcc;
+        uint48 lastSampleAt;
+        uint160 targetAcc;
     }
 
     /// @dev In-memory bundle of a pending challenge's identifying configs (caller-supplied
@@ -107,15 +134,21 @@ abstract contract V4PoolRegistry is OnchainRouterImmutables {
         address targetHooks,
         uint64 startedAt
     );
+    /// @dev Carries both the fresh samples and the running accumulators. The trust model is
+    /// explicitly vigilance-based (see the contract NatSpec), so the chain has to make paying
+    /// attention cheap: anyone can watch these and alert an incumbent's LPs that their
+    /// time-weighted score is being dragged down.
     event V4ChallengePoked(
         bytes32 indexed pairHash,
         uint24 challengerFee,
         int24 challengerTickSpacing,
         address challengerHooks,
-        uint128 challengerMin,
-        uint128 targetMin
+        uint128 challengerSample,
+        uint128 targetSample,
+        uint160 challengerAcc,
+        uint160 targetAcc
     );
-    event V4ChallengeFinalized(bytes32 indexed pairHash, bool success);
+    event V4ChallengeFinalized(bytes32 indexed pairHash, bool success, uint160 challengerAcc, uint160 targetAcc);
     event V4PoolEvicted(bytes32 indexed pairHash, uint24 fee, int24 tickSpacing, address hooks);
 
     error PoolDoesNotExist();
@@ -130,6 +163,7 @@ abstract contract V4PoolRegistry is OnchainRouterImmutables {
     error NoChallenge();
     error ChallengeNotReady();
     error ChallengeExpired();
+    error CustomAccountingHookNotAllowed();
 
     constructor() {
         defaultV4Configs.push(V4PoolConfig({fee: 100, tickSpacing: 1}));
@@ -146,6 +180,7 @@ abstract contract V4PoolRegistry is OnchainRouterImmutables {
     /// finalizeV4Challenge. The new slot starts in cooldown (membership change).
     function registerV4Pool(address tokenA, address tokenB, uint24 fee, int24 tickSpacing, address hooks) external {
         _rejectDefaultConfig(fee, tickSpacing, hooks);
+        _rejectCustomAccountingHook(hooks);
 
         _requireLivePool(tokenA, tokenB, fee, tickSpacing, hooks);
 
@@ -187,6 +222,7 @@ abstract contract V4PoolRegistry is OnchainRouterImmutables {
         if (entries.length < MAX_V4_POOLS_PER_PAIR) revert BoardNotFull(); // not full: register directly
         _checkNotListed(entries, challengerFee, challengerTickSpacing, challengerHooks);
         _rejectDefaultConfig(challengerFee, challengerTickSpacing, challengerHooks);
+        _rejectCustomAccountingHook(challengerHooks);
 
         {
             (bool listed, uint256 targetIdx) = _findEntry(entries, targetFee, targetTickSpacing, targetHooks);
@@ -212,8 +248,13 @@ abstract contract V4PoolRegistry is OnchainRouterImmutables {
             targetFee: targetFee,
             targetTickSpacing: targetTickSpacing,
             targetHooks: targetHooks,
-            challengerMin: challengerLiquidity,
-            targetMin: targetLiquidity
+            // Declaration samples start accruing now; both accumulators start empty, so a
+            // challenger who manipulates at declaration time earns zero weight for it.
+            challengerLast: challengerLiquidity,
+            targetLast: targetLiquidity,
+            challengerAcc: 0,
+            lastSampleAt: uint48(block.timestamp),
+            targetAcc: 0
         });
         emit V4ChallengeStarted(
             ph,
@@ -227,15 +268,20 @@ abstract contract V4PoolRegistry is OnchainRouterImmutables {
         );
     }
 
-    /// @notice Sample both sides of a pending challenge and lower their stored minimums.
-    /// Callable by anyone, any number of times, while the challenge is live.
-    /// @dev A poke can only ever LOWER a side's score, never raise it. This is the teeth
-    /// of the mechanism: one poke while a challenger's flash/JIT liquidity is absent pins
-    /// its score near zero for the rest of the window, and one poke while a stale target
-    /// is empty makes topping it up before finalization pointless. Defenders and
-    /// challengers alike are expected to poke at moments favorable to them; an unpoked
-    /// challenge is decided by the declaration and finalization samples alone, both of
-    /// which the challenger times (see the contract NatSpec for this trust model).
+    /// @notice Sample both sides of a pending challenge, crediting the previous observation
+    /// for the time it held. Callable by anyone, any number of times, while the challenge is
+    /// live.
+    /// @dev Deliberately NOT rate-limited. A minimum spacing between pokes would lock a
+    /// defender out for exactly as long as it constrained an attacker, and defense has to be
+    /// able to land in the very next block: a single counter-poke overwrites a manipulated
+    /// observation and limits its weight to the gap between the two samples.
+    ///
+    /// RETRACTED: an earlier version of this comment claimed defenders and challengers alike
+    /// poke at moments favorable to them, and that one poke defends an incumbent's slot. Under
+    /// the previous min-of-samples scoring that was false in a load-bearing way, because a
+    /// minimum can only fall, so poking could never help a defender and an incumbent had no
+    /// defensive move at all. It is true under time-weighted scoring, which is why the scoring
+    /// changed rather than the comment.
     function pokeV4Challenge(address tokenA, address tokenB, uint24 fee, int24 tickSpacing, address hooks) external {
         (bytes32 ph,, V4Challenge storage challenge, uint48 startedAt) =
             _liveChallenge(tokenA, tokenB, fee, tickSpacing, hooks);
@@ -244,9 +290,11 @@ abstract contract V4PoolRegistry is OnchainRouterImmutables {
             if (block.timestamp > startedAt + CHALLENGE_EXPIRY) revert ChallengeExpired();
         }
 
-        (uint128 challengerMin, uint128 targetMin) =
-            _sampleChallenge(challenge, _challengeRef(tokenA, tokenB, fee, tickSpacing, hooks, challenge));
-        emit V4ChallengePoked(ph, fee, tickSpacing, hooks, challengerMin, targetMin);
+        (uint128 challengerSample, uint128 targetSample) =
+            _accrueChallenge(challenge, _challengeRef(tokenA, tokenB, fee, tickSpacing, hooks, challenge));
+        emit V4ChallengePoked(
+            ph, fee, tickSpacing, hooks, challengerSample, targetSample, challenge.challengerAcc, challenge.targetAcc
+        );
     }
 
     /// @notice Finalize a matured challenge. Callable by anyone.
@@ -271,15 +319,20 @@ abstract contract V4PoolRegistry is OnchainRouterImmutables {
             if (block.timestamp < startedAt + CHALLENGE_DELAY) revert ChallengeNotReady();
             live = block.timestamp <= startedAt + CHALLENGE_EXPIRY;
         }
+        uint160 challengerAcc;
+        uint160 targetAcc;
         if (live) {
             // Snapshot the target config into memory before the delete below
             V4ChallengeRef memory c = _challengeRef(tokenA, tokenB, fee, tickSpacing, hooks, challenge);
-            (uint128 challengerMin, uint128 targetMin) = _sampleChallenge(challenge, c);
-            success = _executeEviction(ph, c, challengerMin, targetMin);
+            // Credit the trailing interval but take NO fresh sample: see _accrueElapsed.
+            _accrueElapsed(challenge);
+            challengerAcc = challenge.challengerAcc;
+            targetAcc = challenge.targetAcc;
+            success = _executeEviction(ph, c, challengerAcc, targetAcc);
         }
         // Past EXPIRY the stale challenge is just discarded (success stays false)
         delete v4Challenges[challengeId];
-        emit V4ChallengeFinalized(ph, success);
+        emit V4ChallengeFinalized(ph, success, challengerAcc, targetAcc);
     }
 
     /// @dev Load a pending challenge by (pair, challenger config), reverting if none
@@ -316,8 +369,11 @@ abstract contract V4PoolRegistry is OnchainRouterImmutables {
         c.targetHooks = challenge.targetHooks;
     }
 
-    /// @dev Evict the named target and seat the challenger, if the min-scores allow it.
-    function _executeEviction(bytes32 ph, V4ChallengeRef memory c, uint128 challengerMin, uint128 targetMin)
+    /// @dev Evict the named target and seat the challenger, if the time-weighted scores allow
+    /// it. Compares the raw accumulators rather than averages: both sides accrued over the
+    /// identical span, so dividing each by the window changes nothing except introducing
+    /// shared-floor ties.
+    function _executeEviction(bytes32 ph, V4ChallengeRef memory c, uint160 challengerAcc, uint160 targetAcc)
         private
         returns (bool)
     {
@@ -332,7 +388,7 @@ abstract contract V4PoolRegistry is OnchainRouterImmutables {
         if (challengerListed) return false;
 
         // Strict inequality: a tie keeps the incumbent
-        if (challengerMin <= targetMin) return false;
+        if (challengerAcc <= targetAcc) return false;
 
         emit V4PoolEvicted(ph, c.targetFee, c.targetTickSpacing, c.targetHooks);
         entries[targetIdx] = _cooldownEntry(c.challengerFee, c.challengerTickSpacing, c.challengerHooks);
@@ -340,26 +396,72 @@ abstract contract V4PoolRegistry is OnchainRouterImmutables {
         return true;
     }
 
-    /// @dev Sample the current active liquidity of both sides of a challenge and fold
-    /// each into its stored running minimum (min-update only; a sample can never raise
-    /// a score). Returns the updated mins.
-    function _sampleChallenge(V4Challenge storage challenge, V4ChallengeRef memory c)
+    /// @dev Fold the interval since the last sample into each side's accumulator, crediting
+    /// the PREVIOUSLY observed liquidity for the time it actually held, then record fresh
+    /// samples as the values that accrue from here.
+    ///
+    /// Crediting the OLD value is the mechanism. A manipulated observation earns weight only
+    /// from the moment it is recorded forward, so the atomic swap-out-of-range / poke /
+    /// swap-back attack costs the target ~0 weighted seconds. And because a later sample
+    /// overwrites it, ANY party (the incumbent's LPs, an arbitrageur, a keeper) can neutralize
+    /// a manipulated sample with a single counter-poke, mis-crediting only the gap between the
+    /// two. This is the property the previous min-of-samples design could not have: a minimum
+    /// can only fall, so the target had no defensive move at all.
+    function _accrueChallenge(V4Challenge storage challenge, V4ChallengeRef memory c)
         private
-        returns (uint128 challengerMin, uint128 targetMin)
+        returns (uint128 challengerSample, uint128 targetSample)
     {
-        uint128 sample = _activeLiquidity(c.tokenA, c.tokenB, c.challengerFee, c.challengerTickSpacing, c.challengerHooks);
-        challengerMin = challenge.challengerMin;
-        if (sample < challengerMin) {
-            challengerMin = sample;
-            challenge.challengerMin = sample;
-        }
+        _accrueElapsed(challenge);
 
-        sample = _activeLiquidity(c.tokenA, c.tokenB, c.targetFee, c.targetTickSpacing, c.targetHooks);
-        targetMin = challenge.targetMin;
-        if (sample < targetMin) {
-            targetMin = sample;
-            challenge.targetMin = sample;
+        challengerSample =
+            _activeLiquidity(c.tokenA, c.tokenB, c.challengerFee, c.challengerTickSpacing, c.challengerHooks);
+        targetSample = _activeLiquidity(c.tokenA, c.tokenB, c.targetFee, c.targetTickSpacing, c.targetHooks);
+        challenge.challengerLast = challengerSample;
+        challenge.targetLast = targetSample;
+    }
+
+    /// @dev Credit both sides' last observation for the time since it was recorded. Split out
+    /// so finalization can accrue WITHOUT taking a fresh sample: a sample only earns weight
+    /// for the interval between it and the next one, so a reading taken at finalization would
+    /// be credited zero seconds and cannot affect the outcome. Skipping it saves two
+    /// staticcalls and, more importantly, makes finalize timing provably neutral. Under the
+    /// previous min-of-samples design the finalization sample WAS decisive, which is exactly
+    /// what made finalize timing worth racing.
+    function _accrueElapsed(V4Challenge storage challenge) private {
+        uint256 elapsed = block.timestamp - challenge.lastSampleAt;
+        if (elapsed == 0) return;
+        unchecked {
+            // See V4Challenge.challengerAcc for the overflow bound.
+            challenge.challengerAcc += uint160(uint256(challenge.challengerLast) * elapsed);
+            challenge.targetAcc += uint160(uint256(challenge.targetLast) * elapsed);
         }
+        challenge.lastSampleAt = uint48(block.timestamp);
+    }
+
+    /// @notice Reject pools whose hook can alter swap amounts via custom accounting.
+    /// @dev The quoter prices pools on core pool math only (V4Quoter is HOOK-UNAWARE BY
+    /// DESIGN). A hook holding either *_RETURNS_DELTA permission serves swaps from its own
+    /// balances, so its quote and its execution are unrelated and its core getLiquidity, which
+    /// is what this leaderboard scores, is not its real depth either. Such a pool earns a slot
+    /// on a measurement that means nothing and then wins routes on a quote the router cannot
+    /// honor.
+    ///
+    /// Permissions are encoded in the hook's ADDRESS bits and enforced by poolManager, so this
+    /// is a pure bit test the hook cannot misreport and that needs no external call. Hooks.sol
+    /// guarantees *_RETURNS_DELTA implies its base *_SWAP flag, so the delta bits suffice.
+    ///
+    /// KNOWINGLY PERMITTED, and NOT covered by the quoter: observer hooks that only watch or
+    /// revert (a reverting hook can hold a slot on honest sustained liquidity and never trade),
+    /// and a per-swap lpFeeOverride on a dynamic-fee pool up to LPFeeLibrary.MAX_LP_FEE (100%).
+    /// Both are quote-vs-execution divergences bounded by the caller's slippage bound, and are
+    /// accepted so that dynamic-fee pools and ordinary observer hooks stay routable.
+    function _rejectCustomAccountingHook(address hooks) private pure {
+        if (hooks == address(0)) return;
+        IHooks h = IHooks(hooks);
+        if (
+            h.hasPermission(Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG)
+                || h.hasPermission(Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG)
+        ) revert CustomAccountingHookNotAllowed();
     }
 
     /// @dev Default configs are probed unconditionally during discovery, so letting one
@@ -374,10 +476,7 @@ abstract contract V4PoolRegistry is OnchainRouterImmutables {
         unchecked {
             // block.timestamp + a small constant cannot overflow uint256
             return V4PoolEntry({
-                fee: fee,
-                tickSpacing: tickSpacing,
-                hooks: hooks,
-                cooldownUntil: uint48(block.timestamp + SLOT_COOLDOWN)
+                fee: fee, tickSpacing: tickSpacing, hooks: hooks, cooldownUntil: uint48(block.timestamp + SLOT_COOLDOWN)
             });
         }
     }
