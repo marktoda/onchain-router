@@ -23,9 +23,8 @@ import {SwapHop} from "./base/OnchainRouterStructs.sol";
 /// live from slot0 rather than from key.fee's 0x800000 sentinel (see V4QuoterMath); verified
 /// by test/DynamicFeeParity.t.sol. NOT covered: a per-swap lpFeeOverride returned by a hook's
 /// beforeSwap, which never reaches slot0 before the quote reads it and can be up to
-/// LPFeeLibrary.MAX_LP_FEE (100%). Such pools ARE reachable through discovery, because the
-/// registry rejects only custom-accounting (*_RETURNS_DELTA) hooks and not observer hooks, so
-/// on those the caller's bound is the only protection against the divergence.
+/// LPFeeLibrary.MAX_LP_FEE (100%). A pool with a beforeSwap hook can reach discovery via the
+/// leaderboard, so on those the caller's bound is the only protection against the divergence.
 abstract contract V4Quoter is OnchainRouterImmutables {
     using PoolIdLibrary for PoolKey;
 
