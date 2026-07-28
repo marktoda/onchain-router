@@ -28,7 +28,7 @@ contract SeededV3ParityTest is MainnetForkFixture {
 
     function setUp() public {
         _forkMainnet();
-        router = new OnchainRouterExposed(V2_FACTORY, V3_FACTORY, address(0), WETH);
+        router = new OnchainRouterExposed(V2_FACTORY, V3_FACTORY, address(0), WETH, address(this));
         minter = new V3PositionMinter();
         recipient = makeAddr("recipient");
 

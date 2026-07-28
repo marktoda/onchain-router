@@ -45,8 +45,9 @@ contract SeededV4ParityTest is BaseForkFixture {
         token6 = new MockERC20("Token6", "T6", 6);
 
         // Mock V2/V3 factories: this suite exercises only the seeded V4 pool
-        router =
-            new OnchainRouterExposed(address(new MockV2Factory()), address(new MockV3Factory()), POOL_MANAGER, WETH);
+        router = new OnchainRouterExposed(
+            address(new MockV2Factory()), address(new MockV3Factory()), POOL_MANAGER, WETH, address(this)
+        );
 
         recipient = makeAddr("recipient");
 

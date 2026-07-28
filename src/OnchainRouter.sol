@@ -12,21 +12,46 @@ import {IWETH9} from "./interfaces/IWETH9.sol";
 import {SafeTransferLib} from "solmate/src/utils/SafeTransferLib.sol";
 import {ERC20} from "solmate/src/tokens/ERC20.sol";
 import {SwapExecutor} from "./base/SwapExecutor.sol";
+import {Ownable2Step} from "./base/Ownable2Step.sol";
 
 /// @title Onchain Router for Uniswap V2, V3, and V4
 /// @notice Finds and executes optimal swap paths across Uniswap V2, V3, and V4 pools
-contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter, PathGenerator, SwapExecutor {
+contract OnchainRouter is
+    OnchainRouterImmutables,
+    V3Quoter,
+    V2Quoter,
+    V4Quoter,
+    PathGenerator,
+    SwapExecutor,
+    Ownable2Step
+{
     using QuoteLibrary for Quote;
     using QuoteLibrary for Pool;
+
+    /// @dev Cap on the intermediate set: quoting cost grows linearly per intermediate
+    /// (roughly two extra full pool sweeps each), so the set stays small by construction.
+    uint256 private constant MAX_INTERMEDIATES = 5;
+
+    /// @dev Reentrancy lock for the swap entrypoints. Transient so it costs no storage
+    /// and always resets at the end of the transaction.
+    bool private transient locked;
+
+    /// @notice Routing intermediates for 2-hop paths. WETH's OTHER role, the canonical
+    /// wrapper for native ETH (msg.value handling, V4 address(0) aliasing), stays pinned
+    /// to the intermediateToken immutable and is unaffected by this set.
+    address[] internal intermediateTokens;
+
+    event IntermediateTokenAdded(address indexed token);
+    event IntermediateTokenRemoved(address indexed token);
 
     error DeadlineExpired();
     error ETHValueMismatch(uint256 expected, uint256 actual);
     error Reentrancy();
     error InputAmountMismatch(uint256 expected, uint256 received);
-
-    /// @dev Reentrancy lock for the swap entrypoints. Transient so it costs no storage
-    /// and always resets at the end of the transaction.
-    bool private transient locked;
+    error TooManyIntermediates();
+    error DuplicateIntermediate();
+    error IntermediateNotFound();
+    error InvalidIntermediate();
 
     /// @dev Guards the external swap entrypoints only. Internal callback re-entry from
     /// poolManager (unlockCallback) and V3 pools (uniswapV3SwapCallback) happens while
@@ -41,10 +66,57 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter,
         locked = false;
     }
 
-    constructor(address _v2Factory, address _v3Factory, address _poolManager, address _weth)
+    constructor(address _v2Factory, address _v3Factory, address _poolManager, address _weth, address _initialOwner)
         OnchainRouterImmutables(_v2Factory, _v3Factory, _poolManager, _weth)
         PathGenerator(_v3Factory)
-    {}
+        Ownable2Step(_initialOwner)
+    {
+        // WETH starts as the sole routing intermediate: behavior at deploy is identical
+        // to the previous hard-coded single-intermediate routing
+        intermediateTokens.push(_weth);
+        emit IntermediateTokenAdded(_weth);
+    }
+
+    /// @notice Register a routing intermediate for 2-hop path search.
+    /// @dev WARNING: do not add fee-on-transfer or rebasing tokens. Exact-delivery
+    /// enforcement (_fundInput) covers only the caller's input token at funding time;
+    /// amounts moving through a mid-route intermediate are assumed to arrive in full, so
+    /// an intermediate that delivers short desynchronizes the second hop's accounting.
+    /// Swaps quoted through such an intermediate revert mid-execution (or, under a loose
+    /// slippage bound, settle with wrong accounting), disabling every route that quotes
+    /// best through it until the token is removed from the set.
+    function addIntermediateToken(address token) external onlyOwner {
+        if (token == address(0)) revert InvalidIntermediate();
+        uint256 length = intermediateTokens.length;
+        if (length >= MAX_INTERMEDIATES) revert TooManyIntermediates();
+        for (uint256 i = 0; i < length; i++) {
+            if (intermediateTokens[i] == token) revert DuplicateIntermediate();
+        }
+        intermediateTokens.push(token);
+        emit IntermediateTokenAdded(token);
+    }
+
+    /// @notice Remove a routing intermediate. Removing WETH from the set only stops it
+    /// being used as a routing hop; native-ETH handling is unaffected.
+    function removeIntermediateToken(address token) external onlyOwner {
+        uint256 length = intermediateTokens.length;
+        for (uint256 i = 0; i < length; i++) {
+            if (intermediateTokens[i] == token) {
+                intermediateTokens[i] = intermediateTokens[length - 1];
+                intermediateTokens.pop();
+                emit IntermediateTokenRemoved(token);
+                return;
+            }
+        }
+        revert IntermediateNotFound();
+    }
+
+    /// @notice The full routing-intermediate set, read atomically in one call so
+    /// integrators get a consistent snapshot. Replaces a public per-index getter, which
+    /// would cost contract-size headroom the router does not have (EIP-170) to duplicate.
+    function getIntermediateTokens() external view returns (address[] memory) {
+        return intermediateTokens;
+    }
 
     receive() external payable {}
 
@@ -283,27 +355,37 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter,
     // ─────────────────────────────────────────────────────────────
 
     /// @notice Find the optimal route for an exact-input swap.
-    /// @dev Compares direct routes and multi-hop routes through intermediateToken.
-    /// For pairs involving intermediateToken, only single-hop is checked.
+    /// @dev Compares the direct route against a 2-hop route through every configured
+    /// intermediate. An intermediate equal to either end of the pair is skipped (that
+    /// candidate is the direct route); the others still get their multi-hop check.
     function routeExactInput(SwapParams memory params) public view returns (Quote memory bestQuote) {
-        if (params.tokenIn == intermediateToken || params.tokenOut == intermediateToken) {
-            return routeExactInputSingle(params);
+        bestQuote = routeExactInputSingle(params);
+        uint256 length = intermediateTokens.length;
+        for (uint256 i = 0; i < length; i++) {
+            address intermediate = intermediateTokens[i];
+            if (intermediate == params.tokenIn || intermediate == params.tokenOut) continue;
+            bestQuote = routeExactInputMulti(params, intermediate).better(bestQuote);
         }
-
-        Quote memory multi = routeExactInputMulti(params, intermediateToken);
-        Quote memory single = routeExactInputSingle(params);
-        return multi.better(single);
     }
 
     /// @notice Find the optimal route for an exact-output swap.
     function routeExactOutput(SwapParams memory params) public view returns (Quote memory bestQuote) {
-        if (params.tokenIn == intermediateToken || params.tokenOut == intermediateToken) {
-            return routeExactOutputSingle(params);
+        bestQuote = routeExactOutputSingle(params);
+        uint256 length = intermediateTokens.length;
+        for (uint256 i = 0; i < length; i++) {
+            address intermediate = intermediateTokens[i];
+            if (intermediate == params.tokenIn || intermediate == params.tokenOut) continue;
+            bestQuote = routeExactOutputMulti(params, intermediate).better(bestQuote);
         }
-
-        Quote memory multi = routeExactOutputMulti(params, intermediateToken);
-        Quote memory single = routeExactOutputSingle(params);
-        return multi.better(single);
+        // The unfillable sentinel (amountIn == uint256.max, from an unfillable direct
+        // pool or routeExactOutputMulti's short-circuit) must not escape to callers:
+        // better() treats only amountIn == 0 as no-route, so when every candidate is
+        // empty or sentinel the fold settles on the sentinel itself. Normalize it to
+        // the canonical no-route quote {0, 0, empty path}.
+        if (bestQuote.amountIn == type(uint256).max) {
+            Quote memory empty;
+            bestQuote = empty;
+        }
     }
 
     function routeExactInputMulti(SwapParams memory params, address intermediate)

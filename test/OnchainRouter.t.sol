@@ -39,7 +39,7 @@ contract RouterForkTest is Test {
         v3Factory = IUniswapV3Factory(0x1F98431c8aD98523631AE4a59f267346ea31F984);
         v2Factory = IUniswapV2Factory(0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f);
 
-        router = new OnchainRouterExposed(address(v2Factory), address(v3Factory), address(0), WETH);
+        router = new OnchainRouterExposed(address(v2Factory), address(v3Factory), address(0), WETH, address(this));
     }
 
     // ======== Fee Tier Tests ========
@@ -209,7 +209,7 @@ contract SwapExecutionForkTest is Test {
         v3Factory = IUniswapV3Factory(0x1F98431c8aD98523631AE4a59f267346ea31F984);
         v2Factory = IUniswapV2Factory(0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f);
 
-        router = new OnchainRouter(address(v2Factory), address(v3Factory), address(0), WETH);
+        router = new OnchainRouter(address(v2Factory), address(v3Factory), address(0), WETH, address(this));
         recipient = makeAddr("recipient");
     }
 
