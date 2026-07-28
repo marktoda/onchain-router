@@ -290,16 +290,19 @@ contract V4LeaderboardTest is Test {
     }
 
     function test_registerV4Pool_fillsLeaderboard() public {
-        // Register 8 pools (MAX_V4_POOLS_PER_PAIR) with different hooks
+        // Register 8 pools (MAX_V4_POOLS_PER_PAIR) with different hooks.
+        // Hook addresses must be 4096-aligned: V4 encodes permissions in the address bits,
+        // and registration now rejects the *_RETURNS_DELTA bits (1<<3, 1<<2). Multiples of
+        // 4096 leave the low 12 bits clear, so these read as permissionless hooks.
         for (uint256 i = 1; i <= 8; i++) {
-            address hooks = address(uint160(i * 1000));
+            address hooks = address(uint160(i * 4096));
             PoolKey memory key = _makeKey(TOKEN_A, TOKEN_B, 500, 10, hooks);
             _mockSlot0(PoolId.unwrap(key.toId()), 1 << 96);
             router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, hooks);
         }
 
         // 9th registration should require liquidity challenge
-        address newHooks = address(uint160(9000));
+        address newHooks = address(uint160(9 * 4096));
         PoolKey memory newKey = _makeKey(TOKEN_A, TOKEN_B, 500, 10, newHooks);
         _mockSlot0(PoolId.unwrap(newKey.toId()), 1 << 96);
 
@@ -307,7 +310,7 @@ contract V4LeaderboardTest is Test {
         // Since challenger needs MORE, this should fail
         _mockLiquidity(PoolId.unwrap(newKey.toId()), 0);
         for (uint256 i = 1; i <= 8; i++) {
-            address hooks = address(uint160(i * 1000));
+            address hooks = address(uint160(i * 4096));
             PoolKey memory key = _makeKey(TOKEN_A, TOKEN_B, 500, 10, hooks);
             _mockLiquidity(PoolId.unwrap(key.toId()), 0);
         }
@@ -319,21 +322,21 @@ contract V4LeaderboardTest is Test {
     function test_registerV4Pool_replacesLowestScore() public {
         // Register 8 pools
         for (uint256 i = 1; i <= 8; i++) {
-            address hooks = address(uint160(i * 1000));
+            address hooks = address(uint160(i * 4096));
             PoolKey memory key = _makeKey(TOKEN_A, TOKEN_B, 500, 10, hooks);
             _mockSlot0(PoolId.unwrap(key.toId()), 1 << 96);
             router.registerV4Pool(TOKEN_A, TOKEN_B, 500, 10, hooks);
         }
 
         // Now register a 9th with higher liquidity than the lowest-scored incumbent
-        address newHooks = address(uint160(9000));
+        address newHooks = address(uint160(9 * 4096));
         PoolKey memory newKey = _makeKey(TOKEN_A, TOKEN_B, 500, 10, newHooks);
         _mockSlot0(PoolId.unwrap(newKey.toId()), 1 << 96);
         _mockLiquidity(PoolId.unwrap(newKey.toId()), 1000e18);
 
         // Mock incumbent liquidities to be lower
         for (uint256 i = 1; i <= 8; i++) {
-            address hooks = address(uint160(i * 1000));
+            address hooks = address(uint160(i * 4096));
             PoolKey memory key = _makeKey(TOKEN_A, TOKEN_B, 500, 10, hooks);
             _mockLiquidity(PoolId.unwrap(key.toId()), 100e18);
         }

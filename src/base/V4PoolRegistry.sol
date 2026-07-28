@@ -6,6 +6,7 @@ import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "v4-core/src/types/PoolId.sol";
 import {Currency} from "v4-core/src/types/Currency.sol";
 import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
+import {Hooks} from "v4-core/src/libraries/Hooks.sol";
 import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
 import {Pool, V4} from "./OnchainRouterStructs.sol";
 import {OnchainRouterImmutables} from "./OnchainRouterImmutables.sol";
@@ -17,6 +18,11 @@ import {OnchainRouterImmutables} from "./OnchainRouterImmutables.sol";
 abstract contract V4PoolRegistry is OnchainRouterImmutables {
     using StateLibrary for IPoolManager;
     using PoolIdLibrary for PoolKey;
+    using Hooks for IHooks;
+
+    /// @dev Thrown when a pool's hook can serve swaps from its own balances, which the
+    /// quoter cannot price. See _rejectCustomAccountingHook.
+    error CustomAccountingHookNotAllowed();
 
     struct V4PoolConfig {
         uint24 fee;
@@ -46,6 +52,8 @@ abstract contract V4PoolRegistry is OnchainRouterImmutables {
     /// @dev Pool must exist (sqrtPriceX96 != 0). If leaderboard is full, challenger must
     /// have more liquidity than the lowest-scored incumbent to replace it.
     function registerV4Pool(address tokenA, address tokenB, uint24 fee, int24 tickSpacing, address hooks) external {
+        _rejectCustomAccountingHook(hooks);
+
         PoolKey memory key = _buildPoolKey(tokenA, tokenB, fee, tickSpacing, hooks);
         PoolId poolId = key.toId();
         (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(poolId);
@@ -152,6 +160,37 @@ abstract contract V4PoolRegistry is OnchainRouterImmutables {
                 return;
             }
         }
+    }
+
+    /// @notice Reject pools whose hook can alter swap amounts via custom accounting.
+    /// @dev The quoter prices pools on core pool math only (V4Quoter is HOOK-UNAWARE BY
+    /// DESIGN). A hook holding either *_RETURNS_DELTA permission can serve a swap from its
+    /// own balances instead of the curve, so its quote and its execution are unrelated, and
+    /// its core getLiquidity (what the leaderboard scores) is not its real depth either.
+    /// Such a pool wins its slot and the route on a quote the router cannot honor.
+    ///
+    /// Hook permissions are encoded in the hook's ADDRESS bits and enforced by
+    /// poolManager, so this is a pure bit test that the hook cannot lie about and that
+    /// needs no external call. Hooks.sol guarantees *_RETURNS_DELTA implies its base
+    /// *_SWAP flag, so testing the delta bits alone is sufficient.
+    ///
+    /// KNOWINGLY PERMITTED, and NOT covered by the quoter:
+    ///  - beforeSwap/afterSwap hooks that only observe or revert. A hook that reverts can
+    ///    hold a slot on honest liquidity and never trade; discovery keeps offering it and
+    ///    swaps through it keep failing.
+    ///  - a per-swap lpFeeOverride on a dynamic-fee pool, up to LPFeeLibrary.MAX_LP_FEE
+    ///    (100%), which the quoter cannot see because it reads the stored slot0 fee.
+    /// Both are quote-vs-execution divergences bounded by the caller's slippage bound:
+    /// zero-tolerance callers revert, loose-bound callers eat up to their tolerance.
+    /// Accepted deliberately so dynamic-fee pools and ordinary observer hooks stay
+    /// routable; revisit with an amount-neutral hook allowlist if abuse appears.
+    function _rejectCustomAccountingHook(address hooks) private pure {
+        if (hooks == address(0)) return;
+        IHooks h = IHooks(hooks);
+        if (
+            h.hasPermission(Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG)
+                || h.hasPermission(Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG)
+        ) revert CustomAccountingHookNotAllowed();
     }
 
     function _buildPoolKey(address tokenA, address tokenB, uint24 fee, int24 tickSpacing, address hooks)
