@@ -784,6 +784,35 @@ contract V4LeaderboardTest is Test {
         assertEq(early, late, "Finalize timing must not change the outcome");
     }
 
+    /// @notice KNOWN RESIDUAL, asserted so the boundary is explicit rather than latent.
+    /// startV4Challenge starts the declaration samples accruing immediately, so a challenge
+    /// nobody ever pokes is decided entirely by samples the challenger timed. A flash
+    /// challenger therefore WINS unpoked: a full window of weight for one transaction of
+    /// exposure. This is the vigilance assumption in the contract NatSpec, and it is the one
+    /// case time-weighting does not bound on its own.
+    ///
+    /// Contrast with test_challenge_flashLiquidityDoesNotWinSlot, which is the same attack with
+    /// a single poke: one observation by anyone collapses the flash weight to almost nothing.
+    /// If this residual is ever closed (a minimum-observation gate failing finalization closed
+    /// on an under-sampled window), this test should flip to assertFalse.
+    function test_challenge_unpokedFlashChallenger_winsKnownResidual() public {
+        _fillBoard(100e18);
+        _rollPastCooldown();
+        address target = _hook(3000);
+        address challenger = _hook(9000);
+
+        // Flash liquidity present only for the declaration transaction.
+        _mockPool(challenger, 1000e18);
+        _start(challenger, target);
+        _mockLiquidityFor(challenger, 1);
+
+        // Nobody pokes for the whole window.
+        _warpBy(CHALLENGE_DELAY + 6 hours);
+        assertTrue(
+            _finalize(challenger), "Documented residual: an unpoked challenge is decided by the declaration samples"
+        );
+    }
+
     // ───────────────────── hook gate ─────────────────────
 
     /// @dev Delta-returning hook addresses. V4 encodes permissions in the address bits, so

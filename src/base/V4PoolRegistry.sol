@@ -29,14 +29,28 @@ import {OnchainRouterImmutables} from "./OnchainRouterImmutables.sol";
 /// the entire window and the incumbent had NO defensive move, because a minimum can only ever
 /// fall.
 ///
-/// RESIDUAL, accepted: an observation is carried forward until the next one, so a manipulated
-/// sample left uncorrected accrues weight for as long as nobody pokes. An attacker cannot have
-/// both a large weight and a short exposure, since weight is proportional to the uncorrected
-/// duration and any single counter-poke by any party ends it. Manipulating at declaration or
-/// immediately before finalization is worthless (zero elapsed time), so the attack requires an
-/// extended stretch of total inattention against a pool whose real depth would otherwise
-/// dominate. Pokes are deliberately NOT rate-limited so a counter-poke can land in the next
-/// block, and the poke/finalize events carry both accumulators so this is monitorable offchain.
+/// RESIDUAL, accepted, and it is a VIGILANCE ASSUMPTION, not a guarantee: an observation is
+/// carried forward until the next one, so a sample left uncorrected accrues weight for as long
+/// as nobody pokes. Two cases, and they are not equally bounded.
+///
+/// Mid-window manipulation is well bounded. An attacker cannot get large weight without a
+/// correspondingly long exposure, since weight is proportional to the uncorrected duration and
+/// any single counter-poke by any party ends it. A sample taken at finalization is worth
+/// nothing at all (zero elapsed time, and finalization does not sample).
+///
+/// The DECLARATION sample is NOT bounded that way, and this is the sharp edge. startV4Challenge
+/// records both sides and starts them accruing immediately, so on a challenge that nobody ever
+/// pokes, the declaration samples decide the outcome for the entire window. A challenger can
+/// flash-borrow liquidity, declare in the same transaction, release it, and win unpoked: full
+/// window of weight for one transaction of exposure. One poke by anyone collapses that to
+/// almost nothing, which is exactly why this is an assumption about observers rather than a
+/// property of the mechanism. See test_challenge_unpokedFlashChallenger_winsKnownResidual.
+///
+/// Pokes are deliberately NOT rate-limited so a counter-poke can land in the next block, and
+/// the poke/finalize events carry both accumulators so this is monitorable offchain. If the
+/// assumption proves too weak in practice, the fix is a minimum-observation gate (fail
+/// finalization closed when the window is under-sampled); slots 2 and 3 of V4Challenge keep
+/// spare bits for it precisely so it can be added without a storage layout change.
 ///
 /// Ties keep the incumbent. Finalize timing is neutral: both sides accrue over the same span,
 /// and no sample taken at finalization can earn weight. Slots that just changed hands are
