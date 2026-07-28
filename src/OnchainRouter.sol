@@ -133,12 +133,14 @@ contract OnchainRouter is OnchainRouterImmutables, V3Quoter, V2Quoter, V4Quoter,
             SafeTransferLib.safeTransferETH(recipient, amountOut);
         }
 
-        // Defense-in-depth refund of unconsumed input. Every hop now enforces full
-        // consumption (V3/V4IncompleteInput), so in normal operation this delta is zero; it
-        // remains as a backstop for native-ETH and non-standard-token edges, and so that no
-        // residual can strand here to be swept by a later caller. Output is a different
-        // token than userTokenIn on every real route, so the balance delta is purely input.
-        // Clamped so a mid-swap credit cannot underflow (mirrors the exact-output path).
+        // Refund unconsumed input. The FIRST hop is deliberately allowed to partial-fill (a
+        // V4 or V3 pool can consume less than the funded amount when its liquidity runs out),
+        // and this is what makes that safe: the remainder is the caller's own input token, so
+        // measuring the balance delta returns it rather than stranding it here where a later
+        // caller could sweep it. Non-first hops are not refundable this way, which is why they
+        // must fully consume instead (V3/V4IncompleteInput). Output is a different token than
+        // userTokenIn on every real route, so the delta is purely input. Clamped so a mid-swap
+        // credit cannot underflow (mirrors the exact-output path).
         uint256 excess = ERC20(userTokenIn).balanceOf(address(this)) - balanceBefore;
         if (excess > quote.amountIn) excess = quote.amountIn;
         if (excess > 0) {

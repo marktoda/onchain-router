@@ -82,10 +82,7 @@ contract IntermediateStrandingTest is BaseForkFixture {
         lpRouter.modifyLiquidity(
             deepKey,
             ModifyLiquidityParams({
-                tickLower: FULL_RANGE_LOWER,
-                tickUpper: FULL_RANGE_UPPER,
-                liquidityDelta: int256(1e21),
-                salt: 0
+                tickLower: FULL_RANGE_LOWER, tickUpper: FULL_RANGE_UPPER, liquidityDelta: int256(1e21), salt: 0
             }),
             ""
         );
@@ -106,12 +103,7 @@ contract IntermediateStrandingTest is BaseForkFixture {
     function _twoHopPath() internal view returns (Pool[] memory path) {
         path = new Pool[](2);
         path[0] = Pool({
-            tokenIn: address(tokenA),
-            tokenOut: address(tokenI),
-            fee: 3000,
-            pool: address(0),
-            version: V4,
-            key: deepKey
+            tokenIn: address(tokenA), tokenOut: address(tokenI), fee: 3000, pool: address(0), version: V4, key: deepKey
         });
         path[1] = Pool({
             tokenIn: address(tokenI),

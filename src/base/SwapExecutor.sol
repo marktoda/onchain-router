@@ -66,7 +66,7 @@ abstract contract SwapExecutor is OnchainRouterImmutables, IUnlockCallback {
             address currentRecipient = i < quote.path.length - 1 ? address(this) : recipient;
 
             if (pool.version == V3) {
-                amountIn = _v3SwapExactInput(quote, amountIn, currentRecipient, i);
+                amountIn = _v3SwapExactInput(quote, amountIn, currentRecipient, i, i > 0);
             } else if (pool.version == V2) {
                 amountIn = _v2SwapExactInput(pool, amountIn, currentRecipient);
             }
@@ -134,9 +134,9 @@ abstract contract SwapExecutor is OnchainRouterImmutables, IUnlockCallback {
             address currentRecipient = i < quote.path.length - 1 ? address(this) : recipient;
 
             if (pool.version == V4) {
-                amountIn = _v4SwapExactInput(pool, amountIn, currentRecipient, i < quote.path.length - 1);
+                amountIn = _v4SwapExactInput(pool, amountIn, currentRecipient, i < quote.path.length - 1, i > 0);
             } else if (pool.version == V3) {
-                amountIn = _v3SwapExactInput(quote, amountIn, currentRecipient, i);
+                amountIn = _v3SwapExactInput(quote, amountIn, currentRecipient, i, i > 0);
             } else if (pool.version == V2) {
                 amountIn = _v2SwapExactInput(pool, amountIn, currentRecipient);
             }
@@ -149,10 +149,13 @@ abstract contract SwapExecutor is OnchainRouterImmutables, IUnlockCallback {
     //  V4 Swap Execution
     // ─────────────────────────────────────────────────────────────
 
-    function _v4SwapExactInput(Pool memory pool, uint256 amountIn, address recipient, bool isIntermediate)
-        private
-        returns (uint256 amountOut)
-    {
+    function _v4SwapExactInput(
+        Pool memory pool,
+        uint256 amountIn,
+        address recipient,
+        bool isIntermediate,
+        bool requireFullInput
+    ) private returns (uint256 amountOut) {
         address weth = intermediateToken;
         PoolKey memory key = pool.key;
         bool zeroForOne = Currency.wrap(pool.tokenIn) < Currency.wrap(pool.tokenOut);
@@ -178,16 +181,19 @@ abstract contract SwapExecutor is OnchainRouterImmutables, IUnlockCallback {
         uint256 inputAmount = uint256(uint128(zeroForOne ? -delta0 : -delta1));
 
         // A hop can consume less than it was funded when the pool's liquidity in this
-        // direction is exhausted before the full amount. Reject rather than proceed: on a
-        // non-first hop the remainder is an intermediate token that no refund path can see
-        // (the refund in OnchainRouter is denominated in the caller's input token), so it
-        // strands here, and under a loose minAmountOut the terminal TooLittleReceived
-        // check does not fire, so the swap "succeeds" while the caller silently loses that
-        // value. Enforced on EVERY hop rather than only later ones: exempting the first hop
-        // would mean a drained pool partial-fills when routed directly but reverts when
-        // routed as hop two, and "exact input" should not quietly become "some of the
-        // input" on either shape. Mirrors V4InvalidAmountOut on the exact-output side.
-        if (inputAmount != amountIn) revert V4IncompleteInput();
+        // direction is exhausted before the full amount. On a NON-FIRST hop the remainder is
+        // an intermediate token that no refund path can see (the refund in OnchainRouter is
+        // denominated in the caller's input token), so it would strand here, and under a
+        // loose minAmountOut the terminal TooLittleReceived check does not fire either: the
+        // swap "succeeds" while the caller silently loses that value. Reject those rather
+        // than add per-token refund accounting, mirroring V4InvalidAmountOut on the
+        // exact-output side.
+        //
+        // The FIRST hop is deliberately exempt. Its remainder is the caller's own input
+        // token, which OnchainRouter measures by balance delta and returns, so nothing
+        // strands and there is no silent loss. Enforcing here as well would delete a working
+        // best-effort-fill-plus-refund path for loose-bound callers without closing anything.
+        if (requireFullInput && inputAmount != amountIn) revert V4IncompleteInput();
 
         // Pre-settle: unwrap WETH→ETH if the V4 pool uses native ETH for input, for
         // exactly the consumed amount (mirrors the exact-output hop). Unwrapping the
@@ -311,10 +317,13 @@ abstract contract SwapExecutor is OnchainRouterImmutables, IUnlockCallback {
     //  V3 Swap Execution
     // ─────────────────────────────────────────────────────────────
 
-    function _v3SwapExactInput(Quote memory quote, uint256 amountIn, address recipient, uint256 pathIndex)
-        private
-        returns (uint256 amountOut)
-    {
+    function _v3SwapExactInput(
+        Quote memory quote,
+        uint256 amountIn,
+        address recipient,
+        uint256 pathIndex,
+        bool requireFullInput
+    ) private returns (uint256 amountOut) {
         Pool memory pool = quote.path[pathIndex];
         bool zeroForOne = pool.tokenIn < pool.tokenOut;
         (int256 amount0Delta, int256 amount1Delta) = IUniswapV3Pool(pool.pool)
@@ -326,10 +335,12 @@ abstract contract SwapExecutor is OnchainRouterImmutables, IUnlockCallback {
                 abi.encode(quote, pathIndex, true)
             );
 
-        // Symmetric with the V4 hop: a V3 pool whose liquidity is exhausted stops at the
-        // price limit and consumes less than requested. See _v4SwapExactInput for why this
-        // is rejected on every hop rather than refunded.
-        if (uint256(zeroForOne ? amount0Delta : amount1Delta) != amountIn) revert V3IncompleteInput();
+        // Symmetric with the V4 hop: a V3 pool whose liquidity is exhausted stops at the price
+        // limit and consumes less than requested. See _v4SwapExactInput for why this is
+        // rejected on non-first hops and deliberately allowed on the first.
+        if (requireFullInput && uint256(zeroForOne ? amount0Delta : amount1Delta) != amountIn) {
+            revert V3IncompleteInput();
+        }
 
         amountOut = zeroForOne ? uint256(-amount1Delta) : uint256(-amount0Delta);
     }

@@ -105,25 +105,26 @@ contract V4FullFillTest is BaseForkFixture {
         assertLe(amountIn, quotedIn, "Input within bound");
     }
 
-    /// @notice BEHAVIOR CHANGE: an exact-input hop that cannot consume its full funded
-    /// amount now reverts instead of partial-filling and refunding the remainder.
-    /// @dev Previously this asserted a partial fill plus refund. Full consumption is now
-    /// enforced on every hop, not just non-first hops, because the alternative was that a
-    /// drained pool partial-fills when routed directly but reverts when routed as hop two
-    /// (the remainder of a later hop is an intermediate token no refund path can measure).
-    /// "Exact input" should not quietly become "some of the input" on either route shape.
-    /// The input refund in OnchainRouter remains as defense-in-depth.
-    function test_v4ExactIn_partialFill_revertsIncompleteInput() public {
+    /// @dev A loose minAmountOut makes a partial-fill exact-in swap succeed: the V4 pool
+    /// consumes only part of the input before hitting its price limit. The unconsumed input
+    /// must be refunded, not stranded in the router where it is sweepable.
+    /// @notice The FIRST hop is deliberately exempt from the full-consumption guard, because
+    /// its remainder is the caller's own input token and the refund measures and returns it.
+    /// Non-first hops are not refundable that way and do revert: see IntermediateStranding.
+    function test_v4ExactIn_partialFill_refundsUnconsumedInput() public {
         uint256 amountIn = 5_000e18; // far more than the shallow pool can absorb
         Pool[] memory path = new Pool[](1);
         path[0] = pool;
-        // minAmountOut = 1: deliberately loose, so only the full-consumption check can fire
+        // minAmountOut = 1: deliberately loose so TooLittleReceived does not fire
         Quote memory quote = Quote({path: path, amountIn: amountIn, amountOut: 0});
 
-        vm.expectRevert(SwapExecutor.V4IncompleteInput.selector);
+        uint256 selfBefore = tokenA.balanceOf(address(this));
         router.swapExactInput(quote, recipient, block.timestamp, false, 1);
 
         assertEq(tokenA.balanceOf(address(router)), 0, "No input token may strand in the router");
+        // The caller is charged only what the swap actually consumed
+        uint256 spent = selfBefore - tokenA.balanceOf(address(this));
+        assertLt(spent, amountIn, "Partial fill must consume less than the full input");
     }
 
     /// @notice A swap sized within the pool's depth still succeeds, so the new check is not
@@ -208,12 +209,7 @@ contract V4NativeFullFillTest is BaseForkFixture {
 
         // Reverse direction through the same pool: tokenB in, native ETH out.
         Pool memory reversePool = Pool({
-            tokenIn: address(tokenB),
-            tokenOut: address(0),
-            fee: 3000,
-            pool: address(0),
-            version: V4,
-            key: poolKey
+            tokenIn: address(tokenB), tokenOut: address(0), fee: 3000, pool: address(0), version: V4, key: poolKey
         });
         Pool[] memory path = new Pool[](1);
         path[0] = reversePool;
@@ -228,19 +224,22 @@ contract V4NativeFullFillTest is BaseForkFixture {
         assertEq(ERC20(WETH).balanceOf(address(router)), 0, "No WETH may strand in the router");
     }
 
-    /// @notice BEHAVIOR CHANGE: native-ETH twin of
-    /// test_v4ExactIn_partialFill_revertsIncompleteInput. Previously asserted a partial fill
-    /// plus refund; full consumption is now enforced on every hop. See that test for why.
-    function test_v4ExactIn_nativePartialFill_revertsIncompleteInput() public {
+    /// @dev Native-ETH twin of test_v4ExactIn_partialFill_refundsUnconsumedInput: the caller
+    /// funds msg.value (wrapped to WETH), the first hop partial-fills under a loose
+    /// minAmountOut, and the unconsumed input must come back with nothing left in the router.
+    function test_v4ExactIn_nativePartialFill_refundsUnconsumedInput() public {
         uint256 amountIn = 5_000e18; // far more than the shallow pool can absorb
         Pool[] memory path = new Pool[](1);
         path[0] = pool;
-        // minAmountOut = 1: deliberately loose, so only the full-consumption check can fire
+        // minAmountOut = 1: deliberately loose so TooLittleReceived does not fire
         Quote memory quote = Quote({path: path, amountIn: amountIn, amountOut: 0});
 
-        vm.expectRevert(SwapExecutor.V4IncompleteInput.selector);
+        uint256 selfBefore = address(this).balance;
         router.swapExactInput{value: amountIn}(quote, recipient, block.timestamp, false, 1);
 
+        uint256 spent = selfBefore - address(this).balance;
+        assertLt(spent, amountIn, "Partial fill must consume less than the full input");
+        assertGt(tokenB.balanceOf(recipient), 0, "Partial output must still be delivered");
         assertEq(address(router).balance, 0, "No native ETH may strand in the router");
         assertEq(ERC20(WETH).balanceOf(address(router)), 0, "No WETH may strand in the router");
     }
